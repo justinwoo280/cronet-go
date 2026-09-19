@@ -248,14 +248,30 @@ func getBuildTagForTarget(targetName string) string {
 
 func runGoModTidy(directory string) {
 	log.Printf("Running go mod tidy in %s with GOPROXY=direct...", directory)
-	command := exec.Command("go", "mod", "tidy")
-	command.Dir = directory
-	command.Env = append(os.Environ(), "GOPROXY=direct", "GOSUMDB=off")
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
-	err := command.Run()
-	if err != nil {
-		log.Fatalf("go mod tidy failed: %v", err)
+	
+	// Retry logic to handle GitHub propagation delay
+	maxRetries := 5
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if attempt > 1 {
+			waitTime := time.Duration(attempt*10) * time.Second
+			log.Printf("Attempt %d/%d failed, waiting %v before retry...", attempt-1, maxRetries, waitTime)
+			time.Sleep(waitTime)
+		}
+		
+		command := exec.Command("go", "mod", "tidy")
+		command.Dir = directory
+		command.Env = append(os.Environ(), "GOPROXY=direct", "GOSUMDB=off")
+		command.Stdout = os.Stdout
+		command.Stderr = os.Stderr
+		err := command.Run()
+		if err == nil {
+			log.Printf("go mod tidy succeeded on attempt %d", attempt)
+			return
+		}
+		
+		if attempt == maxRetries {
+			log.Fatalf("go mod tidy failed after %d attempts: %v", maxRetries, err)
+		}
 	}
 }
 
