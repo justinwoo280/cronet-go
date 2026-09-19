@@ -13,6 +13,7 @@ package cronet
 import "C"
 
 import (
+	"errors"
 	"sync"
 	"unsafe"
 )
@@ -83,6 +84,24 @@ func (e Engine) Destroy() {
 // and only once before other methods can be used.
 func (e Engine) StartWithParams(params EngineParams) Result {
 	return Result(C.Cronet_Engine_StartWithParams(C.Cronet_EnginePtr(unsafe.Pointer(e.ptr)), C.Cronet_EngineParamsPtr(unsafe.Pointer(params.ptr))))
+}
+
+// SetStrictECH requires ECH for every TLS connection, including retries. Call
+// before StartWithParams, with QUIC disabled. The policy cannot change after start.
+func (e Engine) SetStrictECH(enabled bool) error {
+	if !bool(C.Cronet_Engine_SetStrictECH(C.Cronet_EnginePtr(unsafe.Pointer(e.ptr)), C.bool(enabled))) {
+		return errors.New("cronet: Strict ECH must be configured before engine start")
+	}
+	return nil
+}
+
+// SetReality requires REALITY authentication on an engine dedicated to one
+// endpoint. Call before StartWithParams, with QUIC and Strict ECH disabled.
+func (e Engine) SetReality(publicKey [32]byte, shortID [8]byte) error {
+	if !bool(C.Cronet_Engine_SetReality(C.Cronet_EnginePtr(unsafe.Pointer(e.ptr)), (*C.uint8_t)(unsafe.Pointer(&publicKey[0])), (*C.uint8_t)(unsafe.Pointer(&shortID[0])))) {
+		return errors.New("cronet: REALITY must be configured before engine start")
+	}
+	return nil
 }
 
 // StartNetLogToFile starts NetLog logging to a file. The NetLog will contain events emitted

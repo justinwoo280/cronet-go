@@ -244,6 +244,9 @@ func registerSymbols() error {
 	if err := registerFunc(&cronetEngineSetUdpDialer, "Cronet_Engine_SetUdpDialer"); err != nil {
 		return err
 	}
+	// Optional for old libraries; requesting Strict ECH then fails explicitly.
+	_ = registerFunc(&cronetEngineSetStrictECH, "Cronet_Engine_SetStrictECH")
+	_ = registerFunc(&cronetEngineSetReality, "Cronet_Engine_SetReality")
 
 	// EngineParams
 	if err := registerFunc(&cronetEngineParamsCreate, "Cronet_EngineParams_Create"); err != nil {

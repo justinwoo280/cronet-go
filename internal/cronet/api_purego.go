@@ -3,6 +3,7 @@
 package cronet
 
 import (
+	"errors"
 	"runtime"
 	"unsafe"
 )
@@ -77,8 +78,31 @@ func EngineSetDialer(engine, dialer, context uintptr) {
 	cronetEngineSetDialer(engine, dialer, context)
 }
 
+func EngineSetStrictECH(engine uintptr, enabled bool) error {
+	if cronetEngineSetStrictECH == nil {
+		return errors.New("cronet: native library does not support Strict ECH; rebuild or update libcronet")
+	}
+	if !cronetEngineSetStrictECH(engine, enabled) {
+		return errors.New("cronet: Strict ECH must be configured before engine start")
+	}
+	return nil
+}
+
 func EngineSetUdpDialer(engine, dialer, context, onClose uintptr) {
 	cronetEngineSetUdpDialer(engine, dialer, context, onClose)
+}
+
+func EngineSetReality(engine uintptr, publicKey [32]byte, shortID [8]byte) error {
+	if cronetEngineSetReality == nil {
+		return errors.New("cronet: native library does not support REALITY; rebuild or update libcronet")
+	}
+	ok := cronetEngineSetReality(engine, uintptr(unsafe.Pointer(&publicKey[0])), uintptr(unsafe.Pointer(&shortID[0])))
+	runtime.KeepAlive(publicKey)
+	runtime.KeepAlive(shortID)
+	if !ok {
+		return errors.New("cronet: REALITY must be configured before engine start")
+	}
+	return nil
 }
 
 func EngineGetStreamEngine(engine uintptr) uintptr {

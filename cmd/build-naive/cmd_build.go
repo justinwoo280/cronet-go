@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -21,8 +22,11 @@ var commandBuild = &cobra.Command{
 	},
 }
 
+var buildJobs int
+
 func init() {
 	mainCommand.AddCommand(commandBuild)
+	commandBuild.Flags().IntVarP(&buildJobs, "jobs", "j", 0, "Maximum parallel build jobs (0 uses Ninja's default)")
 }
 
 func formatTargetLog(t Target) string {
@@ -350,18 +354,22 @@ func buildTarget(t Target) {
 		log.Fatalf("gn gen failed: %v", err)
 	}
 
+	ninjaArgs := []string{"-C", outputDirectory}
+	if buildJobs > 0 {
+		ninjaArgs = append(ninjaArgs, "-j", strconv.Itoa(buildJobs))
+	}
 	if t.GOOS == "windows" {
 		// Windows: only build DLL (static linking not supported - Chromium uses MSVC, Go CGO only supports MinGW)
 		log.Printf("Running: ninja -C %s cronet", outputDirectory)
-		runCommand(srcRoot, "ninja", "-C", outputDirectory, "cronet")
+		runCommand(srcRoot, "ninja", append(ninjaArgs, "cronet")...)
 	} else {
 		log.Printf("Running: ninja -C %s cronet_static", outputDirectory)
-		runCommand(srcRoot, "ninja", "-C", outputDirectory, "cronet_static")
+		runCommand(srcRoot, "ninja", append(ninjaArgs, "cronet_static")...)
 
 		// For Linux glibc, also build shared library for purego mode and release distribution
 		if t.GOOS == "linux" && t.Libc != "musl" {
 			log.Printf("Running: ninja -C %s cronet", outputDirectory)
-			runCommand(srcRoot, "ninja", "-C", outputDirectory, "cronet")
+			runCommand(srcRoot, "ninja", append(ninjaArgs, "cronet")...)
 		}
 	}
 }

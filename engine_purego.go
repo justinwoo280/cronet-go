@@ -83,6 +83,19 @@ func (e Engine) StartWithParams(params EngineParams) Result {
 	return Result(cronet.EngineStartWithParams(e.ptr, params.ptr))
 }
 
+// SetStrictECH requires ECH for every TLS connection, including retries. Call
+// before StartWithParams, with QUIC disabled. The policy cannot change after start.
+// Returns an error if the loaded native library does not support Strict ECH.
+func (e Engine) SetStrictECH(enabled bool) error {
+	return cronet.EngineSetStrictECH(e.ptr, enabled)
+}
+
+// SetReality requires REALITY authentication on an engine dedicated to one
+// endpoint. Call before StartWithParams, with QUIC and Strict ECH disabled.
+func (e Engine) SetReality(publicKey [32]byte, shortID [8]byte) error {
+	return cronet.EngineSetReality(e.ptr, publicKey, shortID)
+}
+
 // StartNetLogToFile starts NetLog logging to a file. The NetLog will contain events emitted
 // by all live Engines. The NetLog is useful for debugging.
 // The file can be viewed using a Chrome browser navigated to
