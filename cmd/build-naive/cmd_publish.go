@@ -134,12 +134,12 @@ func generateAllPackage(directory, pseudoVersion string, builtTargets []string) 
 
 func generateAllGoMod(allDirectory, pseudoVersion string, builtTargets []string) {
 	var builder strings.Builder
-	builder.WriteString("module github.com/sagernet/cronet-go/all\n\n")
+	fmt.Fprintf(&builder, "module %s/all\n\n", moduleBase)
 	builder.WriteString("go 1.20\n\n")
 	builder.WriteString("require (\n")
-	fmt.Fprintf(&builder, "\tgithub.com/sagernet/cronet-go %s\n", pseudoVersion)
+	fmt.Fprintf(&builder, "\t%s %s\n", moduleBase, pseudoVersion)
 	for _, targetName := range builtTargets {
-		fmt.Fprintf(&builder, "\tgithub.com/sagernet/cronet-go/lib/%s %s\n", targetName, pseudoVersion)
+		fmt.Fprintf(&builder, "\t%s/lib/%s %s\n", moduleBase, targetName, pseudoVersion)
 	}
 	builder.WriteString(")\n")
 
@@ -159,10 +159,10 @@ func generatePlatformImportFile(allDirectory, targetName string) {
 package all
 
 import (
-	_ "github.com/sagernet/cronet-go"
-	_ "github.com/sagernet/cronet-go/lib/%s"
+	_ "%s"
+	_ "%s/lib/%s"
 )
-`, buildTag, targetName)
+`, buildTag, moduleBase, moduleBase, targetName)
 
 	fileName := packageName + ".go"
 	filePath := filepath.Join(allDirectory, fileName)

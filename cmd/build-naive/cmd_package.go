@@ -328,10 +328,10 @@ func generateSubmodules(targets []Target) {
 		targetDirectory := filepath.Join(projectRoot, "lib", directoryName)
 		packageName := strings.ReplaceAll(directoryName, "-", "_")
 
-		goModContent := fmt.Sprintf(`module github.com/sagernet/cronet-go/lib/%s
+		goModContent := fmt.Sprintf(`module %s/lib/%s
 
 go 1.20
-`, directoryName)
+`, moduleBase, directoryName)
 		goModPath := filepath.Join(targetDirectory, "go.mod")
 		err := os.WriteFile(goModPath, []byte(goModContent), 0o644)
 		if err != nil {

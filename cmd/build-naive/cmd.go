@@ -55,6 +55,7 @@ var (
 	srcRoot     string
 	targetStr   string
 	libcStr     string
+	moduleBase  string
 )
 
 var mainCommand = &cobra.Command{
@@ -88,6 +89,38 @@ func preRun(cmd *cobra.Command, args []string) {
 
 	naiveRoot = filepath.Join(projectRoot, "naiveproxy")
 	srcRoot = filepath.Join(naiveRoot, "src")
+	moduleBase = detectModuleBase()
+}
+
+// detectModuleBase derives the Go module path from the git remote URL.
+// Returns "github.com/sagernet/cronet-go" if detection fails.
+func detectModuleBase() string {
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	cmd.Dir = projectRoot
+	output, err := cmd.Output()
+	if err != nil {
+		log.Printf("warning: failed to get git remote URL, using default module base: %v", err)
+		return "github.com/sagernet/cronet-go"
+	}
+
+	url := strings.TrimSpace(string(output))
+
+	// Handle HTTPS: https://github.com/user/repo.git
+	if strings.HasPrefix(url, "https://github.com/") {
+		path := strings.TrimPrefix(url, "https://github.com/")
+		path = strings.TrimSuffix(path, ".git")
+		return "github.com/" + path
+	}
+
+	// Handle SSH: git@github.com:user/repo.git
+	if strings.HasPrefix(url, "git@github.com:") {
+		path := strings.TrimPrefix(url, "git@github.com:")
+		path = strings.TrimSuffix(path, ".git")
+		return "github.com/" + path
+	}
+
+	log.Printf("warning: unrecognized git remote URL format: %s, using default module base", url)
+	return "github.com/sagernet/cronet-go"
 }
 
 func parseTargets() []Target {
