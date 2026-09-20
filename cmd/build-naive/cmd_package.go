@@ -331,7 +331,7 @@ func generateSubmodules(targets []Target) {
 		goModContent := fmt.Sprintf(`module %s/lib/%s
 
 go 1.20
-`, moduleBase, directoryName)
+`, canonicalModulePath, directoryName)
 		goModPath := filepath.Join(targetDirectory, "go.mod")
 		err := os.WriteFile(goModPath, []byte(goModContent), 0o644)
 		if err != nil {

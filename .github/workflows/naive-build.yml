@@ -578,7 +578,25 @@ jobs:
 
       - name: Install iperf3 (Windows)
         if: runner.os == 'Windows'
-        run: choco install iperf3
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "iperf-3.21-win64.zip"
+          $destination = Join-Path $env:RUNNER_TEMP "iperf3"
+          Invoke-WebRequest -Uri "https://github.com/ar51an/iperf3-win-builds/releases/download/3.21/iperf-3.21-win64.zip" -OutFile $archive
+          $expected = "9b73b7e0e0326347b5f4ac4f6a1fc34fe60a5966e5fd172c7bfcd0e1cc93e709"
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne $expected) {
+            throw "iperf3 archive checksum mismatch"
+          }
+          Expand-Archive -Path $archive -DestinationPath $destination -Force
+          $binary = Get-ChildItem -Path $destination -Filter iperf3.exe -Recurse | Select-Object -First 1
+          if ($null -eq $binary) {
+            throw "iperf3.exe missing from archive"
+          }
+          & $binary.FullName --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "iperf3 failed to start"
+          }
+          $binary.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       # CGO mode tests
       - name: Run integration tests (CGO)
@@ -646,7 +664,7 @@ jobs:
 
   publish:
     if: |
-      always() &&
+      !cancelled() &&
       (github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'push' && !contains(github.event.head_commit.message, '[skip publish]'))) &&
       needs.linux.result == 'success' &&
@@ -654,14 +672,23 @@ jobs:
       needs.darwin.result == 'success' &&
       needs.windows.result == 'success' &&
       needs.android.result == 'success' &&
-      (needs['integration-test'].result == 'success' || needs['integration-test'].result == 'skipped')
+      (needs['integration-test'].result == 'success' ||
+        (github.event_name == 'workflow_dispatch' && needs['integration-test'].result == 'skipped'))
     needs: [linux, linux-musl, darwin, windows, android, integration-test]
     runs-on: ubuntu-22.04
     permissions:
       actions: read
       contents: write
+    concurrency:
+      group: publish-${{ github.ref_name == 'main' && 'go' || 'go_dev' }}
+      cancel-in-progress: false
     env:
       TARGET_BRANCH: ${{ github.ref_name == 'main' && 'go' || 'go_dev' }}
+      GOWORK: 'off'
+      GIT_AUTHOR_NAME: Justin Woo
+      GIT_AUTHOR_EMAIL: justinwoo280@gmail.com
+      GIT_COMMITTER_NAME: Justin Woo
+      GIT_COMMITTER_EMAIL: justinwoo280@gmail.com
     steps:
       - uses: actions/checkout@v4
 
@@ -669,9 +696,13 @@ jobs:
         with:
           go-version: ^1.22
 
+      - name: Test publisher
+        run: go test ./cmd/build-naive
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: cronet-*
           path: artifacts/
 
       - name: Merge artifacts
@@ -680,11 +711,6 @@ jobs:
             cp -r "$dir"/* .
           done
           ls -laR lib/ include/ include_cgo.go
-
-      - name: Configure git
-        run: |
-          git config user.name "Justin Woo"
-          git config user.email "justinwoo280@gmail.com"
 
       - name: Publish
         run: go run ./cmd/build-naive publish --branch ${{ env.TARGET_BRANCH }}

@@ -174,3 +174,11 @@ git -C cronet-go-lib sparse-checkout set --no-cone /lib/windows_amd64/libcronet.
 git -C cronet-go-lib fetch --depth=1 --filter=blob:none origin "$CRONET_GO_VERSION"
 git -C cronet-go-lib checkout FETCH_HEAD
 ```
+
+Forks keep the `github.com/sagernet/cronet-go` module declarations and imports.
+The publisher detects the download path from `origin` (or `publish --module-base`)
+and records fork replacements in `all/go.mod`. A downstream application's
+`go.mod` must replace the root module, `all`, and **every** `lib/*` module listed
+there with the corresponding fork versions: Go does not inherit replacements
+from dependencies. Publishing validates the module graph locally before pushing
+the complete result to the `go` branch.
