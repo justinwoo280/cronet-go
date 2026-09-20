@@ -50,6 +50,9 @@ func publish() {
 	copyDirectory(filepath.Join(projectRoot, "include"), filepath.Join(temporaryDirectory, "include"))
 	copyFile(filepath.Join(projectRoot, "include_cgo.go"), filepath.Join(temporaryDirectory, "include_cgo.go"))
 
+	// Rewrite module path in go.mod to match the detected remote (e.g. fork)
+	rewriteModulePath(temporaryDirectory)
+
 	// Use -f (force add) to include .gitignore'd files
 	runCommand(temporaryDirectory, "git", "add", "-f", "-A")
 	commitMessage := fmt.Sprintf("Build from %s", mainCommit[:8])
@@ -100,6 +103,29 @@ func publish() {
 	runCommand(temporaryDirectory, "git", "push", "origin", "HEAD:"+publishBranch)
 
 	log.Printf("Published to %s branch!", publishBranch)
+}
+
+// rewriteModulePath updates the module declaration in go.mod to match
+// the detected module base (from git remote). This is needed when
+// publishing from a fork.
+func rewriteModulePath(directory string) {
+	goModPath := filepath.Join(directory, "go.mod")
+	content, err := os.ReadFile(goModPath)
+	if err != nil {
+		log.Fatalf("failed to read go.mod: %v", err)
+	}
+
+	updated := strings.Replace(string(content), "module github.com/sagernet/cronet-go", "module "+moduleBase, 1)
+	if updated == string(content) {
+		log.Printf("go.mod module path already matches or not found, skipping rewrite")
+		return
+	}
+
+	err = os.WriteFile(goModPath, []byte(updated), 0o644)
+	if err != nil {
+		log.Fatalf("failed to write go.mod: %v", err)
+	}
+	log.Printf("Rewrote go.mod module path to %s", moduleBase)
 }
 
 func formatPseudoVersion(commitTime time.Time, commitHash string) string {
@@ -277,7 +303,7 @@ func runGoModTidy(directory string) {
 
 func forceMainModuleVersion(directory, version string) {
 	log.Printf("Forcing main module version to %s...", version)
-	runCommand(directory, "go", "mod", "edit", "-require=github.com/sagernet/cronet-go@"+version)
+	runCommand(directory, "go", "mod", "edit", "-require="+moduleBase+"@"+version)
 }
 
 func fixLibSubmoduleVersions(libDirectory string, targets []string, version string) {
@@ -297,12 +323,12 @@ func fixLibSubmoduleVersions(libDirectory string, targets []string, version stri
 			log.Fatalf("failed to read %s: %v", goModPath, err)
 		}
 
-		if !strings.Contains(string(content), "github.com/sagernet/cronet-go") {
+		if !strings.Contains(string(content), moduleBase) && !strings.Contains(string(content), "github.com/sagernet/cronet-go") {
 			continue
 		}
 
 		// Force correct version
-		runCommand(submoduleDirectory, "go", "mod", "edit", "-require=github.com/sagernet/cronet-go@"+version)
+		runCommand(submoduleDirectory, "go", "mod", "edit", "-require="+moduleBase+"@"+version)
 		log.Printf("  Fixed lib/%s", targetName)
 	}
 }
