@@ -41,6 +41,24 @@ func TestPublishForkRoundTrip(t *testing.T) {
 		return
 	}
 	directory := t.TempDir()
+	// The Go module cache extracts files and directories as read-only. Make the
+	// test tree writable before t.TempDir removes it, including when the test
+	// fails after the consumer has been populated.
+	t.Cleanup(func() {
+		_ = filepath.Walk(directory, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.Mode()&os.ModeSymlink != 0 {
+				return nil
+			}
+			mode := info.Mode().Perm()
+			if info.IsDir() {
+				mode |= 0o700
+			} else {
+				mode |= 0o600
+			}
+			_ = os.Chmod(path, mode)
+			return nil
+		})
+	})
 	remote := filepath.Join(directory, "remote.git")
 	source := filepath.Join(directory, "source")
 	proxy := filepath.Join(directory, "proxy")
