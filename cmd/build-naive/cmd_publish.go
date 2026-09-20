@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,9 +11,16 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/mod/modfile"
+	"golang.org/x/mod/module"
 )
 
-var publishBranch string
+const canonicalModulePath = "github.com/sagernet/cronet-go"
+
+var (
+	publishBranch     string
+	publishModuleBase string
+)
 
 var commandPublish = &cobra.Command{
 	Use:   "publish",
@@ -24,11 +32,27 @@ var commandPublish = &cobra.Command{
 
 func init() {
 	commandPublish.Flags().StringVar(&publishBranch, "branch", "go", "Target branch to publish to")
+	commandPublish.Flags().StringVar(&publishModuleBase, "module-base", "", "Module download path (defaults to origin; does not change import paths)")
 	mainCommand.AddCommand(commandPublish)
 }
 
 func publish() {
 	log.Printf("Publishing to %s branch...", publishBranch)
+	if publishModuleBase != "" {
+		moduleBase = publishModuleBase
+	} else {
+		remote := strings.TrimSpace(runCommandOutput(projectRoot, "git", "remote", "get-url", "origin"))
+		var err error
+		moduleBase, err = modulePathFromRemote(remote)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	if err := module.CheckPath(moduleBase); err != nil {
+		log.Fatal(err)
+	}
+	branchRef := "refs/heads/" + publishBranch
+	runCommand(projectRoot, "git", "check-ref-format", branchRef)
 
 	mainCommit := strings.TrimSpace(runCommandOutput(projectRoot, "git", "rev-parse", "HEAD"))
 
@@ -41,33 +65,20 @@ func publish() {
 		os.RemoveAll(temporaryDirectory)
 	}()
 
-	runCommand(projectRoot, "git", "worktree", "add", temporaryDirectory, "HEAD")
+	runCommand(projectRoot, "git", "worktree", "add", "--detach", temporaryDirectory, "HEAD")
+	// Keep the source snapshot in the index, but append to the published history.
+	// A normal push then rejects concurrent updates instead of overwriting them.
+	if strings.TrimSpace(runCommandOutput(projectRoot, "git", "ls-remote", "--heads", "origin", branchRef)) != "" {
+		runCommand(temporaryDirectory, "git", "fetch", "--no-tags", "origin", branchRef)
+		runCommand(temporaryDirectory, "git", "reset", "--soft", "FETCH_HEAD")
+	}
 
-	// === Step 1: Push main module + lib submodules ===
-	log.Print("Step 1: Publishing main module and lib submodules...")
+	// Prepare both commits locally; publish only after the module graph validates.
+	log.Print("Step 1: Preparing main module and lib submodules...")
 
 	copyDirectory(filepath.Join(projectRoot, "lib"), filepath.Join(temporaryDirectory, "lib"))
 	copyDirectory(filepath.Join(projectRoot, "include"), filepath.Join(temporaryDirectory, "include"))
 	copyFile(filepath.Join(projectRoot, "include_cgo.go"), filepath.Join(temporaryDirectory, "include_cgo.go"))
-
-	// Rewrite module path in go.mod to match the detected remote (e.g. fork)
-	rewriteModulePath(temporaryDirectory)
-
-	// Use -f (force add) to include .gitignore'd files
-	runCommand(temporaryDirectory, "git", "add", "-f", "-A")
-	commitMessage := fmt.Sprintf("Build from %s", mainCommit[:8])
-	runCommand(temporaryDirectory, "git", "commit", "-m", commitMessage)
-
-	runCommand(temporaryDirectory, "git", "push", "-f", "origin", "HEAD:refs/heads/"+publishBranch)
-
-	firstCommit := strings.TrimSpace(runCommandOutput(temporaryDirectory, "git", "rev-parse", "HEAD"))
-	commitTime := getCommitTime(temporaryDirectory, firstCommit)
-	pseudoVersion := formatPseudoVersion(commitTime, firstCommit)
-
-	log.Printf("First commit: %s, pseudo-version: %s", firstCommit[:12], pseudoVersion)
-
-	// === Step 2: Generate and push all package ===
-	log.Print("Step 2: Generating all package...")
 
 	libDirectory := filepath.Join(temporaryDirectory, "lib")
 	libEntries, err := os.ReadDir(libDirectory)
@@ -78,6 +89,16 @@ func publish() {
 	var builtTargets []string
 	for _, entry := range libEntries {
 		if entry.IsDir() {
+			library := "libcronet.a"
+			if strings.HasPrefix(entry.Name(), "windows_") {
+				library = "libcronet.dll"
+			}
+			info, err := os.Stat(filepath.Join(libDirectory, entry.Name(), library))
+			if err != nil || info.Size() == 0 {
+				log.Fatalf("missing or empty native library for %s", entry.Name())
+			}
+			// Also accepts artifacts produced before the fork-path fix.
+			runCommand(filepath.Join(libDirectory, entry.Name()), "go", "mod", "edit", "-module="+canonicalModulePath+"/lib/"+entry.Name())
 			builtTargets = append(builtTargets, entry.Name())
 		}
 	}
@@ -86,46 +107,97 @@ func publish() {
 		log.Fatal("no lib directories found")
 	}
 
+	// These generated submodules are standalone; they do not require the root module.
+	runCommand(temporaryDirectory, "git", "add", "-f", "--", "lib", "include", "include_cgo.go")
+	commitMessage := fmt.Sprintf("Build from %s", mainCommit[:8])
+	runCommand(temporaryDirectory, "git", "commit", "-m", commitMessage)
+
+	firstCommit := strings.TrimSpace(runCommandOutput(temporaryDirectory, "git", "rev-parse", "HEAD"))
+	pseudoVersion := formatPseudoVersion(getCommitTime(temporaryDirectory, firstCommit), firstCommit)
+	log.Printf("First commit: %s, pseudo-version: %s", firstCommit[:12], pseudoVersion)
+
+	log.Print("Step 2: Generating all package...")
 	generateAllPackage(temporaryDirectory, pseudoVersion, builtTargets)
-
-	// Fix lib submodules' go.mod to use correct pseudo-version
-	// (package stage's go mod tidy may have selected wrong version)
-	fixLibSubmoduleVersions(filepath.Join(temporaryDirectory, "lib"), builtTargets, pseudoVersion)
-
-	// Use GOPROXY=direct to avoid proxy caching issues when using the new pseudo-version
-	runGoModTidy(filepath.Join(temporaryDirectory, "all"))
-
-	// Force correct version after tidy (tidy may select a higher tagged version due to MVS)
-	forceMainModuleVersion(filepath.Join(temporaryDirectory, "all"), pseudoVersion)
-
-	runCommand(temporaryDirectory, "git", "add", "-f", "-A")
+	if err := tidyAllPackage(temporaryDirectory, pseudoVersion, builtTargets); err != nil {
+		log.Fatal(err)
+	}
+	runCommand(temporaryDirectory, "git", "add", "--", "all")
 	runCommand(temporaryDirectory, "git", "commit", "-m", "Generate all package")
-	runCommand(temporaryDirectory, "git", "push", "origin", "HEAD:"+publishBranch)
+	runCommand(temporaryDirectory, "git", "push", "origin", "HEAD:"+branchRef)
 
 	log.Printf("Published to %s branch!", publishBranch)
 }
 
-// rewriteModulePath updates the module declaration in go.mod to match
-// the detected module base (from git remote). This is needed when
-// publishing from a fork.
-func rewriteModulePath(directory string) {
-	goModPath := filepath.Join(directory, "go.mod")
+func modulePathFromRemote(remote string) (string, error) {
+	if strings.HasPrefix(remote, "git@github.com:") {
+		remote = "https://github.com/" + strings.TrimPrefix(remote, "git@github.com:")
+	}
+	parsed, err := url.Parse(remote)
+	if err != nil || parsed.Host != "github.com" {
+		return "", fmt.Errorf("cannot derive a GitHub module download path from origin; specify --module-base")
+	}
+	path := strings.TrimSuffix(strings.Trim(parsed.Path, "/"), ".git")
+	if len(strings.Split(path, "/")) != 2 {
+		return "", fmt.Errorf("origin must identify a GitHub owner/repository")
+	}
+	return "github.com/" + path, nil
+}
+
+// Tidy against the exact local snapshot before it is published. Restore remote
+// replacements afterward so consumers never receive paths into the worktree.
+func tidyAllPackage(directory, version string, targets []string) error {
+	allDirectory := filepath.Join(directory, "all")
+	goModPath := filepath.Join(allDirectory, "go.mod")
+	modules := []string{canonicalModulePath}
+	for _, target := range targets {
+		modules = append(modules, canonicalModulePath+"/lib/"+target)
+	}
+	for _, path := range modules {
+		relative := ".." + strings.TrimPrefix(path, canonicalModulePath)
+		runCommand(allDirectory, "go", "mod", "edit", "-replace="+path+"="+relative)
+	}
+	command := exec.Command("go", "mod", "tidy")
+	command.Dir = allDirectory
+	command.Env = append(os.Environ(), "GOWORK=off")
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("tidy published modules: %w", err)
+	}
 	content, err := os.ReadFile(goModPath)
 	if err != nil {
-		log.Fatalf("failed to read go.mod: %v", err)
+		return err
 	}
-
-	updated := strings.Replace(string(content), "module github.com/sagernet/cronet-go", "module "+moduleBase, 1)
-	if updated == string(content) {
-		log.Printf("go.mod module path already matches or not found, skipping rewrite")
-		return
-	}
-
-	err = os.WriteFile(goModPath, []byte(updated), 0o644)
+	file, err := modfile.Parse(goModPath, content, nil)
 	if err != nil {
-		log.Fatalf("failed to write go.mod: %v", err)
+		return err
 	}
-	log.Printf("Rewrote go.mod module path to %s", moduleBase)
+	for _, path := range modules {
+		found := false
+		for _, requirement := range file.Require {
+			if requirement.Mod.Path == path && requirement.Mod.Version == version {
+				found = true
+			}
+		}
+		if !found {
+			return fmt.Errorf("tidy changed or removed published module %s@%s", path, version)
+		}
+		if err := file.DropReplace(path, ""); err != nil {
+			return err
+		}
+		if moduleBase != canonicalModulePath {
+			remote := moduleBase + strings.TrimPrefix(path, canonicalModulePath)
+			if err := file.AddReplace(path, "", remote, version); err != nil {
+				return err
+			}
+		}
+	}
+	file.Cleanup()
+	content, err = file.Format()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(goModPath, content, 0o644)
 }
 
 func formatPseudoVersion(commitTime time.Time, commitHash string) string {
@@ -160,12 +232,12 @@ func generateAllPackage(directory, pseudoVersion string, builtTargets []string) 
 
 func generateAllGoMod(allDirectory, pseudoVersion string, builtTargets []string) {
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "module %s/all\n\n", moduleBase)
+	fmt.Fprintf(&builder, "module %s/all\n\n", canonicalModulePath)
 	builder.WriteString("go 1.20\n\n")
 	builder.WriteString("require (\n")
-	fmt.Fprintf(&builder, "\t%s %s\n", moduleBase, pseudoVersion)
+	fmt.Fprintf(&builder, "\t%s %s\n", canonicalModulePath, pseudoVersion)
 	for _, targetName := range builtTargets {
-		fmt.Fprintf(&builder, "\t%s/lib/%s %s\n", moduleBase, targetName, pseudoVersion)
+		fmt.Fprintf(&builder, "\t%s/lib/%s %s\n", canonicalModulePath, targetName, pseudoVersion)
 	}
 	builder.WriteString(")\n")
 
@@ -188,7 +260,7 @@ import (
 	_ "%s"
 	_ "%s/lib/%s"
 )
-`, buildTag, moduleBase, moduleBase, targetName)
+`, buildTag, canonicalModulePath, canonicalModulePath, targetName)
 
 	fileName := packageName + ".go"
 	filePath := filepath.Join(allDirectory, fileName)
@@ -270,65 +342,4 @@ func getBuildTagForTarget(targetName string) string {
 	}
 
 	return fmt.Sprintf("%s && %s", goos, goarch)
-}
-
-func runGoModTidy(directory string) {
-	log.Printf("Running go mod tidy in %s with GOPROXY=direct...", directory)
-	
-	// Retry logic to handle GitHub propagation delay
-	maxRetries := 5
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		if attempt > 1 {
-			waitTime := time.Duration(attempt*10) * time.Second
-			log.Printf("Attempt %d/%d failed, waiting %v before retry...", attempt-1, maxRetries, waitTime)
-			time.Sleep(waitTime)
-		}
-		
-		command := exec.Command("go", "mod", "tidy")
-		command.Dir = directory
-		command.Env = append(os.Environ(), "GOPROXY=direct", "GOSUMDB=off")
-		command.Stdout = os.Stdout
-		command.Stderr = os.Stderr
-		err := command.Run()
-		if err == nil {
-			log.Printf("go mod tidy succeeded on attempt %d", attempt)
-			return
-		}
-		
-		if attempt == maxRetries {
-			log.Fatalf("go mod tidy failed after %d attempts: %v", maxRetries, err)
-		}
-	}
-}
-
-func forceMainModuleVersion(directory, version string) {
-	log.Printf("Forcing main module version to %s...", version)
-	runCommand(directory, "go", "mod", "edit", "-require="+moduleBase+"@"+version)
-}
-
-func fixLibSubmoduleVersions(libDirectory string, targets []string, version string) {
-	log.Printf("Fixing lib submodule versions to %s...", version)
-	for _, targetName := range targets {
-		submoduleDirectory := filepath.Join(libDirectory, targetName)
-		goModPath := filepath.Join(submoduleDirectory, "go.mod")
-
-		// Check if go.mod exists
-		if _, err := os.Stat(goModPath); os.IsNotExist(err) {
-			continue
-		}
-
-		// Check if this submodule depends on main module
-		content, err := os.ReadFile(goModPath)
-		if err != nil {
-			log.Fatalf("failed to read %s: %v", goModPath, err)
-		}
-
-		if !strings.Contains(string(content), moduleBase) && !strings.Contains(string(content), "github.com/sagernet/cronet-go") {
-			continue
-		}
-
-		// Force correct version
-		runCommand(submoduleDirectory, "go", "mod", "edit", "-require="+moduleBase+"@"+version)
-		log.Printf("  Fixed lib/%s", targetName)
-	}
 }
