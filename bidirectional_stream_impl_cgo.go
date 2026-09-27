@@ -116,8 +116,8 @@ func cronetBidirectionalStreamOnSucceed(stream *C.bidirectional_stream) {
 	if callback == nil {
 		return
 	}
-	callback.OnSucceeded(cBidirectionalStreamToGo(stream))
 	cleanupBidirectionalStream(uintptr(unsafe.Pointer(stream)))
+	callback.OnSucceeded(cBidirectionalStreamToGo(stream))
 }
 
 //export cronetBidirectionalStreamOnFailed
@@ -126,8 +126,8 @@ func cronetBidirectionalStreamOnFailed(stream *C.bidirectional_stream, netError 
 	if callback == nil {
 		return
 	}
-	callback.OnFailed(cBidirectionalStreamToGo(stream), int(netError))
 	cleanupBidirectionalStream(uintptr(unsafe.Pointer(stream)))
+	callback.OnFailed(cBidirectionalStreamToGo(stream), int(netError))
 }
 
 //export cronetBidirectionalStreamOnCanceled
@@ -136,6 +136,6 @@ func cronetBidirectionalStreamOnCanceled(stream *C.bidirectional_stream) {
 	if callback == nil {
 		return
 	}
-	callback.OnCanceled(cBidirectionalStreamToGo(stream))
 	cleanupBidirectionalStream(uintptr(unsafe.Pointer(stream)))
+	callback.OnCanceled(cBidirectionalStreamToGo(stream))
 }

@@ -71,13 +71,14 @@ func NewEngine() Engine {
 }
 
 func (e Engine) Destroy() {
-	C.Cronet_Engine_Destroy(C.Cronet_EnginePtr(unsafe.Pointer(e.ptr)))
+	// Drop registrations before the allocator can reuse this native address.
 	dialerAccess.Lock()
 	delete(dialerMap, e.ptr)
 	dialerAccess.Unlock()
 	udpDialerAccess.Lock()
 	delete(udpDialerMap, e.ptr)
 	udpDialerAccess.Unlock()
+	C.Cronet_Engine_Destroy(C.Cronet_EnginePtr(unsafe.Pointer(e.ptr)))
 }
 
 // StartWithParams starts Engine using given |params|. The engine must be started once

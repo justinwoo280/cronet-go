@@ -34,11 +34,11 @@ func runnableRunCallback(self uintptr) uintptr {
 	if entry == nil || entry.destroyed.Load() {
 		return 0 // Post-destroy callback, silently ignore
 	}
-	entry.runFunc(Runnable{self})
-	// Run is one-shot - safe to cleanup
+	// Run is one-shot. User code may destroy and reallocate its native handle.
 	runnableAccess.Lock()
 	delete(runnableMap, self)
 	runnableAccess.Unlock()
+	entry.runFunc(Runnable{self})
 	return 0
 }
 
@@ -55,11 +55,12 @@ func NewRunnable(runFunc RunnableRunFunc) Runnable {
 }
 
 func (r Runnable) Destroy() {
-	runnableAccess.RLock()
+	runnableAccess.Lock()
 	entry := runnableMap[r.ptr]
-	runnableAccess.RUnlock()
 	if entry != nil {
 		entry.destroyed.Store(true)
 	}
+	delete(runnableMap, r.ptr)
+	runnableAccess.Unlock()
 	cronet.RunnableDestroy(r.ptr)
 }

@@ -77,10 +77,16 @@ type streamingRequest struct {
 	readCh                         chan struct{}
 	done                           chan struct{}
 	onDone                         func(error)
+	onResponse                     func(URLResponseInfo)
+	onRedirect                     func(URLResponseInfo, string) bool
 }
 
 // upload ownership passes to this function, including initialization failures.
 func newStreamingRequest(engine Engine, executor Executor, method, rawURL string, headers http.Header, upload UploadDataProviderHandler, onDone func(error)) (*streamingRequest, error) {
+	return newStreamingRequestWithCache(engine, executor, method, rawURL, headers, upload, onDone, true)
+}
+
+func newStreamingRequestWithCache(engine Engine, executor Executor, method, rawURL string, headers http.Header, upload UploadDataProviderHandler, onDone func(error), disableCache bool) (*streamingRequest, error) {
 	if engine == (Engine{}) || executor == (Executor{}) {
 		return nil, errors.New("cronet: engine and executor are required")
 	}
@@ -92,7 +98,7 @@ func newStreamingRequest(engine Engine, executor Executor, method, rawURL string
 	params := NewURLRequestParams()
 	defer params.Destroy()
 	params.SetMethod(method)
-	params.SetDisableCache(true)
+	params.SetDisableCache(disableCache)
 	for key, values := range headers {
 		for _, value := range values {
 			header := NewHTTPHeader()
@@ -214,8 +220,13 @@ func (r *streamingRequest) startRead() {
 // cancel is nonblocking and is safe from callbacks; close must be called by an
 // application goroutine, never by an executor callback.
 func (r *streamingRequest) cancel() {
+	r.cancelWithError(context.Canceled)
+}
+
+func (r *streamingRequest) cancelWithError(err error) {
 	r.mu.Lock()
 	if r.err == nil {
+		r.err = err
 		r.serial.submit(func() {
 			if r.terminal {
 				return
@@ -226,7 +237,7 @@ func (r *streamingRequest) cancel() {
 			if r.started {
 				r.request.Cancel()
 			} else {
-				r.finish(context.Canceled)
+				r.finish(err)
 			}
 		})
 	}
@@ -267,11 +278,26 @@ func (r *streamingRequest) fail(err error) {
 	r.request.Cancel()
 }
 
-func (r *streamingRequest) OnRedirectReceived(_ URLRequestCallback, _ URLRequest, info URLResponseInfo, _ string) {
+func (r *streamingRequest) OnRedirectReceived(_ URLRequestCallback, _ URLRequest, info URLResponseInfo, location string) {
+	if r.onRedirect != nil {
+		if r.onRedirect(info, location) {
+			if result := r.request.FollowRedirect(); result != ResultSuccess {
+				r.fail(fmt.Errorf("cronet: follow redirect: result %d", result))
+			}
+		} else {
+			r.fail(io.EOF)
+		}
+		return
+	}
 	r.fail(fmt.Errorf("cronet: unexpected HTTP redirect %d %s", info.StatusCode(), info.StatusText()))
 }
 
 func (r *streamingRequest) OnResponseStarted(_ URLRequestCallback, _ URLRequest, info URLResponseInfo) {
+	if r.onResponse != nil {
+		r.onResponse(info)
+		r.startRead()
+		return
+	}
 	r.mu.Lock()
 	r.status = info.StatusCode()
 	for i := 0; i < info.HeaderSize(); i++ {
@@ -338,7 +364,6 @@ func (r *streamingRequest) cleanup() {
 			r.upload.destroy()
 		}
 		r.request.Destroy()
-		cleanupURLRequestCallback(r.callback.ptr) // Also covers unstarted requests.
 		r.callback.Destroy()
 		r.serial.native.Destroy()
 		r.mu.Lock()
@@ -372,7 +397,7 @@ func (p *streamingUpload) Read(self UploadDataProvider, sink UploadDataSink, buf
 		var n int
 		var err error
 		for attempts := 0; attempts < 100; attempts++ {
-			n, err = reader.reader.Read(buffer.DataSlice())
+			n, err = reader.read(buffer.DataSlice())
 			if n != 0 || err != nil {
 				break
 			}
@@ -392,12 +417,28 @@ func (p *streamingUpload) Read(self UploadDataProvider, sink UploadDataSink, buf
 	}()
 }
 func (p *streamingUpload) Rewind(self UploadDataProvider, sink UploadDataSink) {
+	if reader, ok := p.handler.(*readerUploadProvider); ok {
+		p.request.activeUploads++
+		go func() {
+			err := reader.rewind()
+			p.request.serial.submit(func() {
+				if err != nil {
+					sink.OnRewindError(err.Error())
+				} else {
+					sink.OnRewindSucceeded()
+				}
+				p.request.activeUploads--
+				p.request.cleanup()
+			})
+		}()
+		return
+	}
 	p.handler.Rewind(self, sink)
 }
 func (p *streamingUpload) Close(_ UploadDataProvider) { p.stop() }
 func (p *streamingUpload) stop() {
 	if reader, ok := p.handler.(*readerUploadProvider); ok {
-		_ = reader.reader.Close()
+		reader.stop()
 	}
 }
 func (p *streamingUpload) destroy() {
@@ -405,9 +446,6 @@ func (p *streamingUpload) destroy() {
 		return
 	}
 	p.destroyed = true
-	uploadDataAccess.Lock()
-	delete(uploadDataProviderMap, p.provider.ptr)
-	uploadDataAccess.Unlock()
 	p.provider.Destroy()
 }
 
@@ -432,13 +470,92 @@ func (p *fixedUploadProvider) Rewind(_ UploadDataProvider, sink UploadDataSink) 
 }
 func (*fixedUploadProvider) Close(UploadDataProvider) {}
 
-type readerUploadProvider struct{ reader io.ReadCloser }
+type readerUploadProvider struct {
+	mu      sync.Mutex
+	reader  io.ReadCloser
+	closed  bool
+	length  int64
+	readLen int64
+	getBody func() (io.ReadCloser, error)
+}
 
-func (*readerUploadProvider) Length(UploadDataProvider) int64 { return -1 }
+func (p *readerUploadProvider) Length(UploadDataProvider) int64 {
+	if p.length > 0 {
+		return p.length
+	}
+	return -1
+}
 func (*readerUploadProvider) Read(UploadDataProvider, UploadDataSink, Buffer) {
 	panic("reader uploads require streamingUpload")
 }
 func (*readerUploadProvider) Rewind(_ UploadDataProvider, sink UploadDataSink) {
-	sink.OnRewindError("rewind is not supported")
+	panic("reader uploads require streamingUpload")
 }
-func (p *readerUploadProvider) Close(UploadDataProvider) { _ = p.reader.Close() }
+
+func (p *readerUploadProvider) read(buffer []byte) (int, error) {
+	p.mu.Lock()
+	reader := p.reader
+	p.mu.Unlock()
+	if reader == nil {
+		return 0, io.ErrClosedPipe
+	}
+	// Native upload reads and rewinds are serialized, while stop may run
+	// concurrently to interrupt a blocking Body.Read.
+	if p.length > 0 {
+		buffer = buffer[:min(int64(len(buffer)), p.length-p.readLen)]
+	}
+	n, err := reader.Read(buffer)
+	p.readLen += int64(n)
+	if p.length > 0 && err == io.EOF {
+		if p.readLen == p.length && n > 0 {
+			err = nil
+		} else {
+			err = io.ErrUnexpectedEOF
+		}
+	}
+	return n, err
+}
+
+func (p *readerUploadProvider) rewind() error {
+	if p.getBody == nil {
+		return errors.New("rewind is not supported")
+	}
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return io.ErrClosedPipe
+	}
+	old := p.reader
+	p.reader = nil
+	p.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+	reader, err := p.getBody()
+	if err != nil {
+		return err
+	}
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		_ = reader.Close()
+		return io.ErrClosedPipe
+	}
+	p.reader = reader
+	p.readLen = 0
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *readerUploadProvider) stop() {
+	p.mu.Lock()
+	p.closed = true
+	reader := p.reader
+	p.reader = nil
+	p.mu.Unlock()
+	if reader != nil {
+		_ = reader.Close()
+	}
+}
+
+func (p *readerUploadProvider) Close(UploadDataProvider) { p.stop() }

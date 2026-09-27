@@ -46,12 +46,9 @@ func (e Executor) Destroy() {
 	if entry != nil {
 		entry.destroyed.Store(true)
 	}
-	executorAccess.Unlock()
-	C.Cronet_Executor_Destroy(C.Cronet_ExecutorPtr(unsafe.Pointer(e.ptr)))
-	// Cleanup after C destroy
-	executorAccess.Lock()
 	delete(executors, e.ptr)
 	executorAccess.Unlock()
+	C.Cronet_Executor_Destroy(C.Cronet_ExecutorPtr(unsafe.Pointer(e.ptr)))
 }
 
 //export cronetExecutorExecute

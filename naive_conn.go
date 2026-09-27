@@ -6,6 +6,7 @@ import (
 	"io"
 	"math/rand"
 	"net"
+	"sync"
 
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/baderror"
@@ -185,9 +186,11 @@ type NaiveConn interface {
 }
 type naiveConn struct {
 	net.Conn
-	ctx    context.Context
-	conn   *BidirectionalConn
-	logger logger.ContextLogger
+	ctx     context.Context
+	conn    *BidirectionalConn
+	logger  logger.ContextLogger
+	readMu  sync.Mutex
+	writeMu sync.Mutex
 	paddingConn
 }
 
@@ -226,24 +229,55 @@ func (c *naiveConn) HandshakeContext(ctx context.Context) error {
 }
 
 func (c *naiveConn) Read(p []byte) (n int, err error) {
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
 	n, err = c.readWithPadding(c.Conn, p)
 	return n, baderror.WrapH2(err)
 }
 
 func (c *naiveConn) Write(p []byte) (n int, err error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	n, err = c.writeChunked(c.Conn, p)
 	return n, baderror.WrapH2(err)
 }
 
 func (c *naiveConn) WriteBuffer(buffer *buf.Buffer) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	defer buffer.Release()
 	err := c.writeBufferWithPadding(c.Conn, buffer)
 	return baderror.WrapH2(err)
 }
 
-func (c *naiveConn) FrontHeadroom() int      { return c.frontHeadroom() }
-func (c *naiveConn) RearHeadroom() int       { return c.rearHeadroom() }
-func (c *naiveConn) WriterMTU() int          { return c.writerMTU() }
-func (c *naiveConn) Upstream() any           { return c.Conn }
-func (c *naiveConn) ReaderReplaceable() bool { return c.readerReplaceable() }
-func (c *naiveConn) WriterReplaceable() bool { return c.writerReplaceable() }
+func (c *naiveConn) FrontHeadroom() int {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.frontHeadroom()
+}
+
+func (c *naiveConn) RearHeadroom() int {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.rearHeadroom()
+}
+
+func (c *naiveConn) WriterMTU() int {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.writerMTU()
+}
+
+func (c *naiveConn) Upstream() any { return c.Conn }
+
+func (c *naiveConn) ReaderReplaceable() bool {
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+	return c.readerReplaceable()
+}
+
+func (c *naiveConn) WriterReplaceable() bool {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.writerReplaceable()
+}

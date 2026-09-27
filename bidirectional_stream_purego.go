@@ -29,12 +29,13 @@ func (e StreamEngine) CreateStream(callback BidirectionalStreamCallback) Bidirec
 // callbacks may still be invoked after this returns. The stream is marked
 // as destroyed and callbacks will silently return.
 func (s BidirectionalStream) Destroy() bool {
-	bidirectionalStreamAccess.RLock()
+	bidirectionalStreamAccess.Lock()
 	entry := bidirectionalStreamMap[s.ptr]
-	bidirectionalStreamAccess.RUnlock()
 	if entry != nil {
 		entry.destroyed.Store(true)
 	}
+	delete(bidirectionalStreamMap, s.ptr)
+	bidirectionalStreamAccess.Unlock()
 	return cronet.BidirectionalStreamDestroy(s.ptr) == 0
 }
 

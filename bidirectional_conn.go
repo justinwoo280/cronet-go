@@ -114,7 +114,6 @@ func (c *BidirectionalConn) terminate(err error) {
 		close(c.done)
 		onTerminate = c.onTerminate
 		c.stream.Destroy()
-		cleanupBidirectionalStream(c.stream.ptr)
 	})
 	c.access.Unlock()
 
@@ -249,6 +248,8 @@ func (c *BidirectionalConn) setOnTerminate(fn func()) {
 }
 
 func (c *BidirectionalConn) Err() error {
+	c.access.Lock()
+	defer c.access.Unlock()
 	return c.err
 }
 

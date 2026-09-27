@@ -49,12 +49,13 @@ func NewUploadDataProvider(handler UploadDataProviderHandler) UploadDataProvider
 }
 
 func (p UploadDataProvider) Destroy() {
-	uploadDataAccess.RLock()
+	uploadDataAccess.Lock()
 	entry := uploadDataProviderMap[p.ptr]
-	uploadDataAccess.RUnlock()
 	if entry != nil {
 		entry.destroyed.Store(true)
 	}
+	delete(uploadDataProviderMap, p.ptr)
+	uploadDataAccess.Unlock()
 	C.Cronet_UploadDataProvider_Destroy(C.Cronet_UploadDataProviderPtr(unsafe.Pointer(p.ptr)))
 }
 
@@ -102,9 +103,8 @@ func cronetUploadDataProviderClose(self C.Cronet_UploadDataProviderPtr) {
 	if handler == nil {
 		return // Post-destroy callback, silently ignore
 	}
-	handler.Close(UploadDataProvider{ptr})
-	// Close is terminal callback - safe to cleanup
 	uploadDataAccess.Lock()
 	delete(uploadDataProviderMap, ptr)
 	uploadDataAccess.Unlock()
+	handler.Close(UploadDataProvider{ptr})
 }
