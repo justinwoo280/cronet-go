@@ -83,10 +83,10 @@ func onCloseCallback(self uintptr) uintptr {
 	if handler == nil {
 		return 0
 	}
-	handler.Close(UploadDataProvider{self})
 	uploadDataAccess.Lock()
 	delete(uploadDataProviderMap, self)
 	uploadDataAccess.Unlock()
+	handler.Close(UploadDataProvider{self})
 	return 0
 }
 
@@ -107,11 +107,12 @@ func NewUploadDataProvider(handler UploadDataProviderHandler) UploadDataProvider
 }
 
 func (p UploadDataProvider) Destroy() {
-	uploadDataAccess.RLock()
+	uploadDataAccess.Lock()
 	entry := uploadDataProviderMap[p.ptr]
-	uploadDataAccess.RUnlock()
 	if entry != nil {
 		entry.destroyed.Store(true)
 	}
+	delete(uploadDataProviderMap, p.ptr)
+	uploadDataAccess.Unlock()
 	cronet.UploadDataProviderDestroy(p.ptr)
 }

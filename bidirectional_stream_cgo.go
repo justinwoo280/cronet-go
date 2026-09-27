@@ -46,12 +46,13 @@ func (e StreamEngine) CreateStream(callback BidirectionalStreamCallback) Bidirec
 // invoked after this returns. The stream is marked as destroyed and callbacks
 // will silently return.
 func (c BidirectionalStream) Destroy() bool {
-	bidirectionalStreamAccess.RLock()
+	bidirectionalStreamAccess.Lock()
 	entry := bidirectionalStreamMap[c.ptr]
-	bidirectionalStreamAccess.RUnlock()
 	if entry != nil {
 		entry.destroyed.Store(true)
 	}
+	delete(bidirectionalStreamMap, c.ptr)
+	bidirectionalStreamAccess.Unlock()
 	return C.bidirectional_stream_destroy((*C.bidirectional_stream)(unsafe.Pointer(c.ptr))) == 0
 }
 

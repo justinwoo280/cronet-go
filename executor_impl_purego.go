@@ -65,10 +65,7 @@ func (e Executor) Destroy() {
 	if entry != nil {
 		entry.destroyed.Store(true)
 	}
-	executorAccess.Unlock()
-	cronet.ExecutorDestroy(e.ptr)
-	// Cleanup after C destroy
-	executorAccess.Lock()
 	delete(executors, e.ptr)
 	executorAccess.Unlock()
+	cronet.ExecutorDestroy(e.ptr)
 }

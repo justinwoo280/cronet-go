@@ -40,12 +40,13 @@ func NewBufferCallback(callbackFunc BufferCallbackFunc) BufferCallback {
 }
 
 func (c BufferCallback) destroy() {
-	bufferCallbackAccess.RLock()
+	bufferCallbackAccess.Lock()
 	entry := bufferCallbackMap[c.ptr]
-	bufferCallbackAccess.RUnlock()
 	if entry != nil {
 		entry.destroyed.Store(true)
 	}
+	delete(bufferCallbackMap, c.ptr)
+	bufferCallbackAccess.Unlock()
 }
 
 //export cronetBufferCallbackOnDestroy
@@ -57,10 +58,10 @@ func cronetBufferCallbackOnDestroy(self C.Cronet_BufferCallbackPtr, buffer C.Cro
 	if entry == nil || entry.destroyed.Load() {
 		return
 	}
-	if entry.callback != nil {
-		entry.callback(BufferCallback{ptrInt}, Buffer{uintptr(unsafe.Pointer(buffer))})
-	}
 	bufferCallbackAccess.Lock()
 	delete(bufferCallbackMap, ptrInt)
 	bufferCallbackAccess.Unlock()
+	if entry.callback != nil {
+		entry.callback(BufferCallback{ptrInt}, Buffer{uintptr(unsafe.Pointer(buffer))})
+	}
 }

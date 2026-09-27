@@ -53,12 +53,13 @@ func NewURLRequestCallback(handler URLRequestCallbackHandler) URLRequestCallback
 }
 
 func (c URLRequestCallback) Destroy() {
-	urlRequestCallbackAccess.RLock()
+	urlRequestCallbackAccess.Lock()
 	entry := urlRequestCallbackMap[c.ptr]
-	urlRequestCallbackAccess.RUnlock()
 	if entry != nil {
 		entry.destroyed.Store(true)
 	}
+	delete(urlRequestCallbackMap, c.ptr)
+	urlRequestCallbackAccess.Unlock()
 	C.Cronet_UrlRequestCallback_Destroy(C.Cronet_UrlRequestCallbackPtr(unsafe.Pointer(c.ptr)))
 }
 
@@ -105,9 +106,8 @@ func cronetURLRequestCallbackOnSucceeded(self C.Cronet_UrlRequestCallbackPtr, re
 	if handler == nil {
 		return // Post-destroy callback, silently ignore
 	}
-	handler.OnSucceeded(URLRequestCallback{uintptr(unsafe.Pointer(self))}, URLRequest{uintptr(unsafe.Pointer(request))}, URLResponseInfo{uintptr(unsafe.Pointer(info))})
-	// Terminal callback - safe to cleanup
 	cleanupURLRequestCallback(uintptr(unsafe.Pointer(self)))
+	handler.OnSucceeded(URLRequestCallback{uintptr(unsafe.Pointer(self))}, URLRequest{uintptr(unsafe.Pointer(request))}, URLResponseInfo{uintptr(unsafe.Pointer(info))})
 }
 
 //export cronetURLRequestCallbackOnFailed
@@ -116,9 +116,8 @@ func cronetURLRequestCallbackOnFailed(self C.Cronet_UrlRequestCallbackPtr, reque
 	if handler == nil {
 		return // Post-destroy callback, silently ignore
 	}
-	handler.OnFailed(URLRequestCallback{uintptr(unsafe.Pointer(self))}, URLRequest{uintptr(unsafe.Pointer(request))}, URLResponseInfo{uintptr(unsafe.Pointer(info))}, Error{uintptr(unsafe.Pointer(error))})
-	// Terminal callback - safe to cleanup
 	cleanupURLRequestCallback(uintptr(unsafe.Pointer(self)))
+	handler.OnFailed(URLRequestCallback{uintptr(unsafe.Pointer(self))}, URLRequest{uintptr(unsafe.Pointer(request))}, URLResponseInfo{uintptr(unsafe.Pointer(info))}, Error{uintptr(unsafe.Pointer(error))})
 }
 
 //export cronetURLRequestCallbackOnCanceled
@@ -127,9 +126,8 @@ func cronetURLRequestCallbackOnCanceled(self C.Cronet_UrlRequestCallbackPtr, req
 	if handler == nil {
 		return // Post-destroy callback, silently ignore
 	}
-	handler.OnCanceled(URLRequestCallback{uintptr(unsafe.Pointer(self))}, URLRequest{uintptr(unsafe.Pointer(request))}, URLResponseInfo{uintptr(unsafe.Pointer(info))})
-	// Terminal callback - safe to cleanup
 	cleanupURLRequestCallback(uintptr(unsafe.Pointer(self)))
+	handler.OnCanceled(URLRequestCallback{uintptr(unsafe.Pointer(self))}, URLRequest{uintptr(unsafe.Pointer(request))}, URLResponseInfo{uintptr(unsafe.Pointer(info))})
 }
 
 func cleanupURLRequestCallback(ptr uintptr) {

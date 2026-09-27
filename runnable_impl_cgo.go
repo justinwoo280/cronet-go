@@ -42,12 +42,13 @@ func NewRunnable(runFunc RunnableRunFunc) Runnable {
 }
 
 func (r Runnable) Destroy() {
-	runnableAccess.RLock()
+	runnableAccess.Lock()
 	entry := runnableMap[r.ptr]
-	runnableAccess.RUnlock()
 	if entry != nil {
 		entry.destroyed.Store(true)
 	}
+	delete(runnableMap, r.ptr)
+	runnableAccess.Unlock()
 	C.Cronet_Runnable_Destroy(C.Cronet_RunnablePtr(unsafe.Pointer(r.ptr)))
 }
 
@@ -60,9 +61,8 @@ func cronetRunnableRun(self C.Cronet_RunnablePtr) {
 	if entry == nil || entry.destroyed.Load() {
 		return // Post-destroy callback, silently ignore
 	}
-	entry.runFunc(Runnable{ptr})
-	// Run is one-shot - safe to cleanup
 	runnableAccess.Lock()
 	delete(runnableMap, ptr)
 	runnableAccess.Unlock()
+	entry.runFunc(Runnable{ptr})
 }

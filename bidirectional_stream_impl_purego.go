@@ -97,8 +97,8 @@ func bsOnSucceededCallback(stream uintptr) uintptr {
 	if cb == nil {
 		return 0
 	}
-	cb.OnSucceeded(BidirectionalStream{stream})
 	cleanupBidirectionalStream(stream)
+	cb.OnSucceeded(BidirectionalStream{stream})
 	return 0
 }
 
@@ -107,8 +107,8 @@ func bsOnFailedCallback(stream uintptr, netError int32) uintptr {
 	if cb == nil {
 		return 0
 	}
-	cb.OnFailed(BidirectionalStream{stream}, int(netError))
 	cleanupBidirectionalStream(stream)
+	cb.OnFailed(BidirectionalStream{stream}, int(netError))
 	return 0
 }
 
@@ -117,8 +117,8 @@ func bsOnCanceledCallback(stream uintptr) uintptr {
 	if cb == nil {
 		return 0
 	}
-	cb.OnCanceled(BidirectionalStream{stream})
 	cleanupBidirectionalStream(stream)
+	cb.OnCanceled(BidirectionalStream{stream})
 	return 0
 }
 

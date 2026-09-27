@@ -98,13 +98,12 @@ func onSucceededCallback(self, request, info uintptr) uintptr {
 	if handler == nil {
 		return 0 // Post-destroy callback, silently ignore
 	}
+	cleanupURLRequestCallback(self)
 	handler.OnSucceeded(
 		URLRequestCallback{self},
 		URLRequest{request},
 		URLResponseInfo{info},
 	)
-	// Terminal callback - safe to cleanup
-	cleanupURLRequestCallback(self)
 	return 0
 }
 
@@ -113,14 +112,13 @@ func onFailedCallback(self, request, info, err uintptr) uintptr {
 	if handler == nil {
 		return 0 // Post-destroy callback, silently ignore
 	}
+	cleanupURLRequestCallback(self)
 	handler.OnFailed(
 		URLRequestCallback{self},
 		URLRequest{request},
 		URLResponseInfo{info},
 		Error{err},
 	)
-	// Terminal callback - safe to cleanup
-	cleanupURLRequestCallback(self)
 	return 0
 }
 
@@ -129,13 +127,12 @@ func onCanceledCallback(self, request, info uintptr) uintptr {
 	if handler == nil {
 		return 0 // Post-destroy callback, silently ignore
 	}
+	cleanupURLRequestCallback(self)
 	handler.OnCanceled(
 		URLRequestCallback{self},
 		URLRequest{request},
 		URLResponseInfo{info},
 	)
-	// Terminal callback - safe to cleanup
-	cleanupURLRequestCallback(self)
 	return 0
 }
 
@@ -164,11 +161,12 @@ func NewURLRequestCallback(handler URLRequestCallbackHandler) URLRequestCallback
 }
 
 func (c URLRequestCallback) Destroy() {
-	urlRequestCallbackAccess.RLock()
+	urlRequestCallbackAccess.Lock()
 	entry := urlRequestCallbackMap[c.ptr]
-	urlRequestCallbackAccess.RUnlock()
 	if entry != nil {
 		entry.destroyed.Store(true)
 	}
+	delete(urlRequestCallbackMap, c.ptr)
+	urlRequestCallbackAccess.Unlock()
 	cronet.UrlRequestCallbackDestroy(c.ptr)
 }

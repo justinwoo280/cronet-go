@@ -46,12 +46,9 @@ func (l URLRequestFinishedInfoListener) Destroy() {
 	if entry != nil {
 		entry.destroyed.Store(true)
 	}
-	urlRequestFinishedInfoListenerAccess.Unlock()
-	C.Cronet_RequestFinishedInfoListener_Destroy(C.Cronet_RequestFinishedInfoListenerPtr(unsafe.Pointer(l.ptr)))
-	// Cleanup after C destroy
-	urlRequestFinishedInfoListenerAccess.Lock()
 	delete(urlRequestFinishedInfoListenerMap, l.ptr)
 	urlRequestFinishedInfoListenerAccess.Unlock()
+	C.Cronet_RequestFinishedInfoListener_Destroy(C.Cronet_RequestFinishedInfoListenerPtr(unsafe.Pointer(l.ptr)))
 }
 
 //export cronetURLRequestFinishedInfoListenerOnRequestFinished

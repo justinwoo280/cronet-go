@@ -60,10 +60,6 @@ func (l URLRequestFinishedInfoListener) destroy() {
 	if entry != nil {
 		entry.destroyed.Store(true)
 	}
-	urlRequestFinishedInfoListenerAccess.Unlock()
-	cronet.RequestFinishedInfoListenerDestroy(l.ptr)
-	// Cleanup after C destroy
-	urlRequestFinishedInfoListenerAccess.Lock()
 	delete(urlRequestFinishedInfoListenerMap, l.ptr)
 	urlRequestFinishedInfoListenerAccess.Unlock()
 }

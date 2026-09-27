@@ -34,13 +34,14 @@ func onBufferDestroyCallback(self, buffer uintptr) uintptr {
 	if entry == nil || entry.destroyed.Load() {
 		return 0 // Post-destroy callback, silently ignore
 	}
-	if entry.callback != nil {
-		entry.callback(BufferCallback{self}, Buffer{buffer})
-	}
-	// OnDestroy is the cleanup signal - safe to delete
+	// Remove ownership before calling user code, which may destroy this handle
+	// and allocate another callback at the same native address.
 	bufferCallbackAccess.Lock()
 	delete(bufferCallbackMap, self)
 	bufferCallbackAccess.Unlock()
+	if entry.callback != nil {
+		entry.callback(BufferCallback{self}, Buffer{buffer})
+	}
 	return 0
 }
 
@@ -55,10 +56,11 @@ func NewBufferCallback(callbackFunc BufferCallbackFunc) BufferCallback {
 }
 
 func (c BufferCallback) destroy() {
-	bufferCallbackAccess.RLock()
+	bufferCallbackAccess.Lock()
 	entry := bufferCallbackMap[c.ptr]
-	bufferCallbackAccess.RUnlock()
 	if entry != nil {
 		entry.destroyed.Store(true)
 	}
+	delete(bufferCallbackMap, c.ptr)
+	bufferCallbackAccess.Unlock()
 }

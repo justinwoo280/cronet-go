@@ -68,7 +68,10 @@ type NaiveClient struct {
 	quicCongestionControl    QUICCongestionControl
 	quicSessionReceiveWindow uint64
 	counter                  atomic.Uint64
+	lifecycleMu              sync.Mutex
+	activeOperations         sync.WaitGroup
 	started                  chan struct{}
+	closed                   chan struct{}
 	singleEngine             bool
 	engines                  []Engine
 	streamEngines            []StreamEngine
@@ -170,6 +173,7 @@ func NewNaiveClient(config NaiveClientOptions) (*NaiveClient, error) {
 		receiveWindow:            config.ReceiveWindow,
 		quicSessionReceiveWindow: config.QUICSessionReceiveWindow,
 		started:                  make(chan struct{}),
+		closed:                   make(chan struct{}),
 	}, nil
 }
 
@@ -198,8 +202,10 @@ func (c *NaiveClient) Start() error {
 				engine.Shutdown()
 				engine.Destroy()
 			}
+			c.proxyWaitGroup.Wait()
 			c.state.Store(uint32(clientStateClosed))
 			close(c.started)
+			close(c.closed)
 		}
 	}()
 
@@ -229,7 +235,9 @@ func (c *NaiveClient) Start() error {
 				return NetErrorConnectionFailed.Code()
 			}
 
+			c.proxyWaitGroup.Add(1)
 			go func() {
+				defer c.proxyWaitGroup.Done()
 				_ = serveDNSStreamConn(proxyContext, conn, dnsResolver)
 			}()
 
@@ -285,7 +293,9 @@ func (c *NaiveClient) Start() error {
 			}
 
 			dnsContext, dnsCancel := context.WithCancel(proxyContext)
+			c.proxyWaitGroup.Add(1)
 			go func() {
+				defer c.proxyWaitGroup.Done()
 				defer dnsCancel()
 				_ = serveDNSPacketConn(dnsContext, conn, dnsResolver)
 			}()
@@ -440,9 +450,14 @@ func (c *NaiveClient) Engine() Engine {
 }
 
 func (c *NaiveClient) CloseAllConnections() {
+	c.lifecycleMu.Lock()
 	if clientState(c.state.Load()) != clientStateRunning {
+		c.lifecycleMu.Unlock()
 		return
 	}
+	c.activeOperations.Add(1)
+	c.lifecycleMu.Unlock()
+	defer c.activeOperations.Done()
 	for _, engine := range c.engines {
 		engine.CloseAllConnections()
 	}
@@ -462,8 +477,26 @@ func (c *NaiveClient) DialEarly(ctx context.Context, destination M.Socksaddr) (N
 			}
 		case <-c.ctx.Done():
 			return nil, c.ctx.Err()
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
 	}
+	c.lifecycleMu.Lock()
+	if clientState(c.state.Load()) != clientStateRunning {
+		c.lifecycleMu.Unlock()
+		return nil, net.ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		c.lifecycleMu.Unlock()
+		return nil, err
+	}
+	// Close first stops admissions, then waits for stream creation/start to
+	// finish before closing sockets. The connection reservation lasts until
+	// the native terminal callback has queued stream destruction.
+	c.activeOperations.Add(1)
+	c.activeConnections.Add(1)
+	c.lifecycleMu.Unlock()
+	defer c.activeOperations.Done()
 	headers := map[string]string{
 		"-connect-authority": destination.String(),
 		"Padding":            generatePaddingHeader(),
@@ -488,16 +521,14 @@ func (c *NaiveClient) DialEarly(ctx context.Context, destination M.Socksaddr) (N
 		}
 	}
 	conn := streamEngine.CreateConn(ctx, c.logger, true, false)
-	err := conn.Start("CONNECT", c.serverURL, headers, 0, false)
-	if err != nil {
-		return nil, err
-	}
 	trackedConn := &trackedNaiveConn{
 		NaiveConn: NewNaiveConn(ctx, conn, c.logger),
 		client:    c,
 	}
-	c.activeConnections.Add(1)
 	conn.setOnTerminate(trackedConn.release)
+	if err := conn.Start("CONNECT", c.serverURL, headers, 0, false); err != nil {
+		return nil, err
+	}
 	return trackedConn, nil
 }
 
@@ -528,24 +559,24 @@ func (c *NaiveClient) Close() error {
 		case clientStateCreated:
 			if c.state.CompareAndSwap(uint32(clientStateCreated), uint32(clientStateClosed)) {
 				close(c.started)
+				close(c.closed)
 				return nil
 			}
 
 		case clientStateStarting:
-			select {
-			case <-c.started:
-				continue
-			case <-c.ctx.Done():
-				return c.ctx.Err()
-			}
+			<-c.started
 
 		case clientStateRunning:
+			c.lifecycleMu.Lock()
 			if !c.state.CompareAndSwap(uint32(clientStateRunning), uint32(clientStateClosing)) {
+				c.lifecycleMu.Unlock()
 				continue
 			}
+			c.lifecycleMu.Unlock()
 			return c.doClose()
 
 		case clientStateClosing:
+			<-c.closed
 			return nil
 
 		case clientStateClosed:
@@ -559,17 +590,21 @@ func (c *NaiveClient) doClose() error {
 		c.proxyCancel()
 	}
 
+	c.activeOperations.Wait()
 	for _, engine := range c.engines {
 		engine.CloseAllConnections()
 	}
-	c.proxyWaitGroup.Wait()
 	c.activeConnections.Wait()
 	for _, engine := range c.engines {
 		engine.Shutdown()
 		engine.Destroy()
 	}
+	// Only joining the engines guarantees that socket callbacks can no longer
+	// add relays or DNS workers to this wait group.
+	c.proxyWaitGroup.Wait()
 
 	c.state.Store(uint32(clientStateClosed))
+	close(c.closed)
 	return nil
 }
 
@@ -592,7 +627,6 @@ func (c *trackedNaiveConn) release() {
 }
 
 func (c *trackedNaiveConn) Close() error {
-	c.release()
 	return c.NaiveConn.Close()
 }
 
