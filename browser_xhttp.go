@@ -21,8 +21,9 @@ import (
 )
 
 const (
-	BrowserXHTTPModePacketUp = "packet-up"
-	BrowserXHTTPModeStreamUp = "stream-up"
+	BrowserXHTTPModePacketUp  = "packet-up"
+	BrowserXHTTPModeStreamUp  = "stream-up"
+	BrowserXHTTPModeStreamOne = "stream-one"
 
 	BrowserXHTTPPlacementPath          = "path"
 	BrowserXHTTPPlacementQuery         = "query"
@@ -63,6 +64,9 @@ type BrowserXHTTPOptions struct {
 
 	NoGRPCHeader bool
 	NoSSEHeader  bool
+	// GRPCFraming enables sing-xhttp's optional protobuf/gRPC streaming format.
+	// Both peers must enable it; stock Xray uses raw streaming bodies.
+	GRPCFraming bool
 
 	XPaddingBytes   BrowserXHTTPRange
 	XPaddingObfs    bool
@@ -113,7 +117,7 @@ type BrowserXHTTPOptions struct {
 }
 
 // BrowserXHTTPClient is a Cronet-backed XHTTP client transport. It implements
-// net.Conn sessions for packet-up and stream-up modes.
+// net.Conn sessions for packet-up, stream-up and stream-one modes.
 type BrowserXHTTPClient struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -165,11 +169,20 @@ func NewBrowserXHTTPClient(ctx context.Context, baseURL string, options BrowserX
 	if options.Mode == "" {
 		options.Mode = BrowserXHTTPModePacketUp
 	}
-	if options.Mode != BrowserXHTTPModePacketUp && options.Mode != BrowserXHTTPModeStreamUp {
+	if options.Mode != BrowserXHTTPModePacketUp && options.Mode != BrowserXHTTPModeStreamUp && options.Mode != BrowserXHTTPModeStreamOne {
 		return nil, fmt.Errorf("cronet xhttp: unsupported mode %q", options.Mode)
+	}
+	if (options.Mode == BrowserXHTTPModeStreamOne || options.GRPCFraming) && u.Scheme != "https" {
+		return nil, errors.New("cronet xhttp: bidirectional streaming requires HTTPS with HTTP/2 or HTTP/3")
+	}
+	if options.GRPCFraming && options.Path == "" {
+		options.Path = u.Path
 	}
 	if err := validateBrowserOptions(options); err != nil {
 		return nil, err
+	}
+	if options.GRPCFraming && u.RawQuery != "" {
+		return nil, errors.New("cronet xhttp: grpc_framing does not support a URL query")
 	}
 	if (len(options.ECHConfigList) > 0 || options.GetECHConfigList != nil) && (u.Scheme != "https" || net.ParseIP(u.Hostname()) != nil) {
 		return nil, errors.New("cronet xhttp: ECH requires an HTTPS URL with a DNS hostname")
@@ -290,9 +303,8 @@ func NewBrowserXHTTPClient(ctx context.Context, baseURL string, options BrowserX
 	return c, nil
 }
 
-// DialContext opens one XHTTP session. The GET is started before the method
-// returns and may still be waiting for response headers when the connection is
-// handed to the caller; this is required for middleboxes that buffer headers.
+// DialContext starts the session without waiting for response headers, allowing
+// the caller to send the first bytes through intermediaries that buffer headers.
 func (c *BrowserXHTTPClient) DialContext(ctx context.Context) (net.Conn, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -317,23 +329,8 @@ func (c *BrowserXHTTPClient) DialContext(ctx context.Context) (net.Conn, error) 
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
-	sessionID := c.codec.generateSessionID()
-	getURL, getHeaders := c.newRequest(http.MethodGet, sessionID, "")
-	get, err := newStreamingRequest(c.engine, c.executor, http.MethodGet, getURL, getHeaders, nil, nil)
-	if err != nil {
-		c.mu.Unlock()
-		cancel()
-		return nil, err
-	}
-	if err = get.start(); err != nil {
-		c.mu.Unlock()
-		cancel()
-		return nil, err
-	}
-
 	conn := &browserXHTTPConn{
 		client: c,
-		reader: get,
 		local:  &net.TCPAddr{},
 		remote: browserRemoteAddr(c.baseURL),
 		cancel: cancel,
@@ -341,18 +338,38 @@ func (c *BrowserXHTTPClient) DialContext(ctx context.Context) (net.Conn, error) 
 		ctx:    ctx,
 	}
 	conn.setDeadlines(time.Time{}, time.Time{})
-
-	switch c.opts.Mode {
-	case BrowserXHTTPModeStreamUp:
-		if err := c.startStreamUp(ctx, sessionID, conn); err != nil {
-			cancel()
-			_ = conn.writer.Close()
-			_ = get.close()
-			c.mu.Unlock()
-			return nil, err
+	var err error
+	if c.opts.Mode == BrowserXHTTPModeStreamOne {
+		err = c.startStreamOne(conn)
+	} else {
+		sessionID := c.codec.generateSessionID()
+		getURL, getHeaders := c.newRequest(http.MethodGet, sessionID, "")
+		var get *streamingRequest
+		get, err = newStreamingRequest(c.engine, c.executor, http.MethodGet, getURL, getHeaders, nil, nil)
+		if err == nil {
+			conn.reader = get
+			err = get.start()
 		}
-	case BrowserXHTTPModePacketUp:
-		c.startPacketUp(ctx, sessionID, conn)
+		if err == nil {
+			if c.opts.Mode == BrowserXHTTPModeStreamUp {
+				err = c.startStreamUp(ctx, sessionID, conn)
+			} else {
+				c.startPacketUp(ctx, sessionID, conn)
+			}
+		}
+	}
+	if err != nil {
+		cancel()
+		conn.readCancel()
+		conn.writeCancel()
+		if conn.writer != nil {
+			_ = conn.writer.Close()
+		}
+		if conn.reader != nil {
+			_ = conn.reader.close()
+		}
+		c.mu.Unlock()
+		return nil, err
 	}
 
 	c.conns[conn] = struct{}{}
@@ -363,12 +380,11 @@ func (c *BrowserXHTTPClient) DialContext(ctx context.Context) (net.Conn, error) 
 			conn.setError(ctx.Err())
 		case <-c.ctx.Done():
 			conn.setError(c.ctx.Err())
-		case <-get.done:
-			get.mu.Lock()
-			err := get.err
-			get.mu.Unlock()
-			// Preserve any buffered response bytes on normal EOF.
-			if errors.Is(err, io.EOF) {
+		case <-conn.reader.doneChannel():
+			err := conn.reader.streamError()
+			// Duplex cleanup has already stopped upload. Let Read deliver all
+			// decoded bytes before reporting an RPC/network error or EOF.
+			if c.opts.Mode == BrowserXHTTPModeStreamOne || errors.Is(err, io.EOF) {
 				return
 			}
 			conn.setError(err)
@@ -382,12 +398,14 @@ func (c *BrowserXHTTPClient) startStreamUp(ctx context.Context, sessionID string
 	writer := newBrowserBatch(streamingReadBufferSize)
 	reader := &browserBatchReader{batch: writer}
 	conn.writer = writer
-	upload := &readerUploadProvider{reader: reader}
-	postURL, postHeaders := c.newRequest(c.opts.Method, sessionID, "")
-	if !c.opts.NoGRPCHeader {
-		postHeaders.Set("Content-Type", "application/grpc")
+	postURL, postHeaders := c.newStreamRequest(sessionID)
+	var post browserRequest
+	var err error
+	if c.opts.GRPCFraming {
+		post = newBrowserDuplexRequest(c.engine, c.opts.Method, postURL, postHeaders, reader, true)
+	} else {
+		post, err = newStreamingRequest(c.engine, c.executor, c.opts.Method, postURL, postHeaders, &readerUploadProvider{reader: reader}, nil)
 	}
-	post, err := newStreamingRequest(c.engine, c.executor, c.opts.Method, postURL, postHeaders, upload, nil)
 	if err != nil {
 		_ = reader.Close()
 		return err
@@ -404,9 +422,45 @@ func (c *BrowserXHTTPClient) startStreamUp(ctx context.Context, sessionID string
 			conn.setError(err)
 			_ = writer.closeWithError(err)
 			conn.reader.cancel()
+		} else {
+			// A successful upload response may precede the final download bytes.
+			_ = writer.closeWithError(io.ErrClosedPipe)
 		}
 	}()
 	return nil
+}
+
+func (c *BrowserXHTTPClient) startStreamOne(conn *browserXHTTPConn) error {
+	writer := newBrowserBatch(streamingReadBufferSize)
+	conn.writer = writer
+	requestURL, headers := c.newStreamRequest("")
+	request := newBrowserDuplexRequest(c.engine, c.opts.Method, requestURL, headers, &browserBatchReader{batch: writer}, c.opts.GRPCFraming)
+	conn.reader = request
+	return request.start()
+}
+
+func (c *BrowserXHTTPClient) newStreamRequest(sessionID string) (string, http.Header) {
+	if !c.opts.GRPCFraming {
+		u, headers := c.newRequest(c.opts.Method, sessionID, "")
+		if !c.opts.NoGRPCHeader {
+			headers.Set("Content-Type", "application/grpc")
+		}
+		return u, headers
+	}
+	u := c.baseURL
+	u.Path = browserGRPCPath(c.codec.basePath)
+	u.RawPath, u.RawQuery = "", ""
+	headers := cloneHTTPHeaders(c.opts.Headers)
+	headers.Set("Host", c.host)
+	c.codec.applyPadding(&u, headers)
+	headers.Set("Content-Type", "application/grpc")
+	headers.Set("TE", "trailers")
+	headers.Set("Accept-Encoding", "identity")
+	headers.Del(browserGRPCSessionHeader)
+	if sessionID != "" {
+		headers.Set(browserGRPCSessionHeader, sessionID)
+	}
+	return u.String(), headers
 }
 
 func (c *BrowserXHTTPClient) startPacketUp(ctx context.Context, sessionID string, conn *browserXHTTPConn) {
@@ -552,8 +606,8 @@ func (c *BrowserXHTTPClient) removeConn(conn *browserXHTTPConn) {
 
 type browserXHTTPConn struct {
 	client     *BrowserXHTTPClient
-	reader     *streamingRequest
-	post       *streamingRequest
+	reader     browserRequest
+	post       browserRequest
 	writer     io.WriteCloser
 	local      net.Addr
 	remote     net.Addr
@@ -1161,6 +1215,26 @@ func contextError(ctx context.Context) error {
 }
 
 func validateBrowserOptions(o BrowserXHTTPOptions) error {
+	if o.GRPCFraming {
+		if o.Mode != BrowserXHTTPModeStreamUp && o.Mode != BrowserXHTTPModeStreamOne {
+			return errors.New("cronet xhttp: grpc_framing requires stream-up or stream-one")
+		}
+		if o.NoGRPCHeader {
+			return errors.New("cronet xhttp: grpc_framing requires gRPC headers")
+		}
+		if o.Method != "" && o.Method != http.MethodPost {
+			return errors.New("cronet xhttp: grpc_framing requires POST")
+		}
+		if o.UplinkPlace != "" && o.UplinkPlace != BrowserXHTTPPlacementBody {
+			return errors.New("cronet xhttp: grpc_framing requires body uplink placement")
+		}
+		if !validBrowserGRPCPath(o.Path) {
+			return errors.New("cronet xhttp: grpc_framing path must name one gRPC service, for example /xhttp")
+		}
+		if o.XPaddingObfs && o.XPaddingPlace == BrowserXHTTPPlacementQuery {
+			return errors.New("cronet xhttp: grpc_framing does not support query padding")
+		}
+	}
 	if o.Reality != nil {
 		if o.Engine != (Engine{}) {
 			return errors.New("cronet xhttp: REALITY requires an owned engine")
@@ -1199,8 +1273,8 @@ func validateBrowserOptions(o BrowserXHTTPOptions) error {
 	switch o.UplinkPlace {
 	case "", BrowserXHTTPPlacementBody, BrowserXHTTPPlacementAuto:
 	case BrowserXHTTPPlacementHeader, BrowserXHTTPPlacementCookie:
-		if o.Mode == BrowserXHTTPModeStreamUp {
-			return errors.New("cronet xhttp: stream-up requires body uplink placement")
+		if o.Mode == BrowserXHTTPModeStreamUp || o.Mode == BrowserXHTTPModeStreamOne {
+			return errors.New("cronet xhttp: streaming modes require body uplink placement")
 		}
 		if o.UplinkKey == "" {
 			return errors.New("cronet xhttp: uplink key is required for header/cookie placement")

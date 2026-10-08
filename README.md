@@ -92,13 +92,35 @@ and local CGO linker flags. These generated artifacts are ignored by Git.
 
 ### Browser XHTTP
 
-`NewBrowserXHTTPClient` exposes `packet-up` and `stream-up` sessions as `net.Conn`.
+`NewBrowserXHTTPClient` exposes `packet-up`, `stream-up` and `stream-one` sessions
+as `net.Conn`. The default mode is `packet-up`. `stream-one` requires HTTPS and
+HTTP/2 or HTTP/3 and allows the first write before receiving response headers.
 It implements XHTTP metadata/padding independently and uses Cronet for TLS,
 HTTP/2, QUIC and connection reuse. An optional `DialContext` callback supplies
 the actual TCP endpoint through the application's routing; this disables QUIC.
 Direct TCP sockets are duplicated for Cronet, and other connections are relayed
 through a socketpair. `Host` is independent of the URL's TLS hostname when using
 the native library built from this checkout.
+
+For gRPC-aware intermediaries, set `BrowserXHTTPOptions.GRPCFraming` and select
+`stream-up` or `stream-one`. Enable the corresponding `grpc_framing` option on the
+sing-xhttp server. This optional format is incompatible with stock Xray; leaving
+it disabled preserves XHTTP's raw bodies.
+
+Framed POSTs use `/<service>/Tun`, where `Path` names a protobuf service such as
+`/example.Tunnel` (the default is `/xhttp/Tun`). Each message has the five-byte
+gRPC header and protobuf `bytes data = 1`. Cronet splits uploads into at most
+32 KiB of payload per message, accepts messages up to 4 MiB, and validates
+`grpc-status` trailers. Compression is unsupported. These requests use the native
+bidirectional API over HTTPS with HTTP/2 or HTTP/3; gRPC middleware normally
+requires HTTP/2. Resetting a read deadline resumes any partially received frame.
+
+In framed `stream-up`, the POST carries `X-Xhttp-Session`, and response heartbeats
+also use gRPC framing. Its separate download remains an ordinary streaming GET
+with the configured session placement and needs an HTTP streaming route.
+`stream-one` uses one bidirectional RPC for both directions. Framing requires
+POST, body payload placement and gRPC headers; query strings in the service path,
+query padding and `NoGRPCHeader` are rejected.
 
 ECH is supported over the custom TCP dialer with an HTTPS DNS hostname. Supply
 the wire-format `ECHConfigList` or a `GetECHConfigList(context.Context)` callback
