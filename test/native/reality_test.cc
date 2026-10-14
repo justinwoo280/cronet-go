@@ -1,7 +1,9 @@
 // REALITY client regression against an in-memory TLS fixture. The production
 // interop test uses sing-box's existing server; this fixture injects failures
 // into authenticated certificates, CertificateVerify and Finished separately.
+#include "net/ssl/cert_compression.h"
 #include "ssl/internal.h"
+#include "third_party/brotli/include/brotli/encode.h"
 #include <openssl/aead.h>
 #include <openssl/bio.h>
 #include <openssl/curve25519.h>
@@ -17,10 +19,12 @@
 #include <vector>
 
 enum class Fault { kNone, kHmac, kSignature, kFinished, kHrr };
+enum class KeyShares { kDual, kX25519Only, kHybridOnly };
 struct State {
   Fault fault;
   uint8_t signing_private[64];
   int authenticated = 0;
+  int compressed_certificates = 0;
 };
 
 static ssl_verify_result_t Verify(SSL* ssl, uint8_t*) {
@@ -44,6 +48,10 @@ static ssl_private_key_result_t Sign(SSL* ssl, uint8_t* out, size_t* out_len,
 static void Message(int write, int, int type, const void* buf, size_t len,
                     SSL* ssl, void*) {
   auto* state = static_cast<State*>(SSL_get_app_data(ssl));
+  if (write && type == SSL3_RT_HANDSHAKE && len &&
+      static_cast<const uint8_t*>(buf)[0] == SSL3_MT_COMPRESSED_CERTIFICATE) {
+    state->compressed_certificates++;
+  }
   if (state->fault == Fault::kFinished && write && type == SSL3_RT_HANDSHAKE &&
       len && static_cast<const uint8_t*>(buf)[0] == SSL3_MT_CERTIFICATE_VERIFY) {
     // CertificateVerify is already signed. Alter only the server's transcript
@@ -51,6 +59,16 @@ static void Message(int write, int, int type, const void* buf, size_t len,
     const uint8_t extra[] = {0};
     assert(ssl->s3->hs->transcript.Update(extra));
   }
+}
+
+static int CompressCertificate(SSL*, CBB* out, const uint8_t* in, size_t in_len) {
+  std::vector<uint8_t> compressed(BrotliEncoderMaxCompressedSize(in_len));
+  size_t size = compressed.size();
+  if (!BrotliEncoderCompress(5, BROTLI_DEFAULT_WINDOW, BROTLI_MODE_GENERIC,
+                            in_len, in, &size, compressed.data())) {
+    return 0;
+  }
+  return CBB_add_bytes(out, compressed.data(), size);
 }
 
 static int SelectCertificate(SSL* ssl, void*) {
@@ -68,10 +86,19 @@ static void Transfer(BIO* from, BIO* to) {
   }
 }
 
-static void Run(Fault fault, bool hybrid_only) {
+static void Run(Fault fault, KeyShares shares, bool compressed) {
   State state{fault};
-  bssl::UniquePtr<SSL_CTX> ctx(SSL_CTX_new(TLS_method()));
-  bssl::UniquePtr<SSL> client(SSL_new(ctx.get())), server(SSL_new(ctx.get()));
+  bssl::UniquePtr<SSL_CTX> client_ctx(SSL_CTX_new(TLS_method()));
+  bssl::UniquePtr<SSL_CTX> server_ctx(SSL_CTX_new(TLS_method()));
+  if (compressed) {
+    // Use Chromium's production decoder, not a test replacement.
+    net::ConfigureCertificateCompression(client_ctx.get());
+    assert(SSL_CTX_add_cert_compression_alg(
+        server_ctx.get(), TLSEXT_cert_compression_brotli, CompressCertificate,
+        nullptr));
+  }
+  bssl::UniquePtr<SSL> client(SSL_new(client_ctx.get()));
+  bssl::UniquePtr<SSL> server(SSL_new(server_ctx.get()));
   SSL_set_connect_state(client.get());
   SSL_set_accept_state(server.get());
   SSL_set_app_data(client.get(), &state);
@@ -83,9 +110,14 @@ static void Run(Fault fault, bool hybrid_only) {
   const uint16_t groups[] = {SSL_GROUP_X25519_MLKEM768, SSL_GROUP_X25519,
                              SSL_GROUP_SECP256R1};
   assert(SSL_set1_group_ids(client.get(), groups, 3));
-  assert(SSL_set1_client_key_shares(client.get(), groups, hybrid_only ? 1 : 2));
-  const uint16_t server_group = fault == Fault::kHrr ? SSL_GROUP_SECP256R1
-                                                    : SSL_GROUP_X25519_MLKEM768;
+  const bool hybrid_only = shares == KeyShares::kHybridOnly;
+  const bool x25519_only = shares == KeyShares::kX25519Only;
+  assert(SSL_set1_client_key_shares(client.get(), groups + (x25519_only ? 1 : 0),
+                                  shares == KeyShares::kDual ? 2 : 1));
+  const uint16_t server_group =
+      fault == Fault::kHrr ? SSL_GROUP_SECP256R1
+                          : x25519_only ? SSL_GROUP_X25519
+                                        : SSL_GROUP_X25519_MLKEM768;
   assert(SSL_set1_group_ids(server.get(), &server_group, 1));
   const uint16_t chrome_sigs[] = {SSL_SIGN_ECDSA_SECP256R1_SHA256,
                                   SSL_SIGN_RSA_PSS_RSAE_SHA256};
@@ -218,16 +250,50 @@ static void Run(Fault fault, bool hybrid_only) {
     if (fault == Fault::kSignature) assert(failure_reason == SSL_R_BAD_SIGNATURE);
     if (fault == Fault::kFinished) assert(failure_reason == SSL_R_DIGEST_CHECK_FAILED);
   }
-  printf("PASS: REALITY fault=%d hybrid-only=%d authenticated=%d reason=%u\n",
-         static_cast<int>(fault), hybrid_only, state.authenticated, failure_reason);
+  assert(state.compressed_certificates ==
+         (compressed && fault != Fault::kHrr ? 1 : 0));
+  printf("PASS: REALITY fault=%d shares=%d brotli=%d authenticated=%d reason=%u\n",
+         static_cast<int>(fault), static_cast<int>(shares), compressed,
+         state.authenticated, failure_reason);
+}
+
+static void RejectUnusableAuthentication(bool missing_share) {
+  bssl::UniquePtr<SSL_CTX> ctx(SSL_CTX_new(TLS_method()));
+  bssl::UniquePtr<SSL> client(SSL_new(ctx.get()));
+  SSL_set_connect_state(client.get());
+  const uint16_t group = missing_share ? SSL_GROUP_SECP256R1 : SSL_GROUP_X25519;
+  assert(SSL_set1_group_ids(client.get(), &group, 1));
+  assert(SSL_set1_client_key_shares(client.get(), &group, 1));
+  uint8_t public_key[32] = {}, private_key[32];
+  if (missing_share) {
+    X25519_keypair(public_key, private_key);
+  }
+  const uint8_t short_id[8] = {};
+  assert(SSL_set1_reality_config(client.get(), public_key, short_id));
+  BIO* input = BIO_new(BIO_s_mem());
+  BIO* output = BIO_new(BIO_s_mem());
+  BIO_set_mem_eof_return(input, -1);
+  SSL_set_bio(client.get(), input, output);
+  ERR_clear_error();
+  int result = SSL_do_handshake(client.get());
+  assert(result < 0 && SSL_get_error(client.get(), result) == SSL_ERROR_SSL);
+  assert(ERR_GET_REASON(ERR_peek_last_error()) == SSL_R_BAD_ECPOINT);
+  assert(BIO_ctrl_pending(output) == 0);
+  printf("PASS: REALITY unusable auth missing-share=%d, no ClientHello sent\n",
+         missing_share);
 }
 
 int main() {
   setbuf(stdout, nullptr);
-  for (bool hybrid_only : {false, true}) {
-    for (Fault fault : {Fault::kNone, Fault::kHmac, Fault::kSignature,
-                        Fault::kFinished, Fault::kHrr}) {
-      Run(fault, hybrid_only);
+  for (KeyShares shares : {KeyShares::kDual, KeyShares::kX25519Only,
+                          KeyShares::kHybridOnly}) {
+    for (bool compressed : {false, true}) {
+      for (Fault fault : {Fault::kNone, Fault::kHmac, Fault::kSignature,
+                         Fault::kFinished, Fault::kHrr}) {
+        Run(fault, shares, compressed);
+      }
     }
   }
+  RejectUnusableAuthentication(false);
+  RejectUnusableAuthentication(true);
 }

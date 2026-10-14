@@ -329,13 +329,15 @@ func (c *BrowserXHTTPClient) DialContext(ctx context.Context) (net.Conn, error) 
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
+	uploadCtx, uploadCancel := context.WithCancel(ctx)
 	conn := &browserXHTTPConn{
-		client: c,
-		local:  &net.TCPAddr{},
-		remote: browserRemoteAddr(c.baseURL),
-		cancel: cancel,
-		mode:   c.opts.Mode,
-		ctx:    ctx,
+		client:       c,
+		local:        &net.TCPAddr{},
+		remote:       browserRemoteAddr(c.baseURL),
+		cancel:       cancel,
+		mode:         c.opts.Mode,
+		ctx:          ctx,
+		uploadCancel: uploadCancel,
 	}
 	conn.setDeadlines(time.Time{}, time.Time{})
 	var err error
@@ -352,9 +354,9 @@ func (c *BrowserXHTTPClient) DialContext(ctx context.Context) (net.Conn, error) 
 		}
 		if err == nil {
 			if c.opts.Mode == BrowserXHTTPModeStreamUp {
-				err = c.startStreamUp(ctx, sessionID, conn)
+				err = c.startStreamUp(uploadCtx, sessionID, conn)
 			} else {
-				c.startPacketUp(ctx, sessionID, conn)
+				c.startPacketUp(uploadCtx, sessionID, conn)
 			}
 		}
 	}
@@ -375,21 +377,25 @@ func (c *BrowserXHTTPClient) DialContext(ctx context.Context) (net.Conn, error) 
 	c.conns[conn] = struct{}{}
 	c.mu.Unlock()
 	go func() {
-		select {
-		case <-ctx.Done():
-			conn.setError(ctx.Err())
-		case <-c.ctx.Done():
-			conn.setError(c.ctx.Err())
-		case <-conn.reader.doneChannel():
-			err := conn.reader.streamError()
-			// Duplex cleanup has already stopped upload. Let Read deliver all
-			// decoded bytes before reporting an RPC/network error or EOF.
-			if c.opts.Mode == BrowserXHTTPModeStreamOne || errors.Is(err, io.EOF) {
-				return
+		downloadDone := conn.reader.doneChannel()
+		for {
+			select {
+			case <-ctx.Done():
+				conn.setError(ctx.Err())
+			case <-c.ctx.Done():
+				conn.setError(c.ctx.Err())
+			case <-downloadDone:
+				// An ended download cannot carry any more upload responses. Stop
+				// both kinds of upload even on a clean proxy END_STREAM, but let
+				// Read drain buffered bytes before publishing the terminal error.
+				conn.stopUpload(conn.reader.streamError())
+				downloadDone = nil
+				// Continue observing cancellation while buffered data is unread.
+				continue
 			}
-			conn.setError(err)
+			_ = conn.Close()
+			return
 		}
-		_ = conn.Close()
 	}()
 	return conn, nil
 }
@@ -419,9 +425,14 @@ func (c *BrowserXHTTPClient) startStreamUp(ctx context.Context, sessionID string
 	go func() {
 		defer close(conn.uploadDone)
 		if err := post.wait(ctx); err != nil {
-			conn.setError(err)
-			_ = writer.closeWithError(err)
-			conn.reader.cancel()
+			// Download termination cancels upload separately so its cleanup
+			// cannot replace the original response error with context.Canceled.
+			if ctx.Err() == nil {
+				conn.setError(err)
+				_ = writer.closeWithError(err)
+				conn.reader.cancel()
+				conn.cancel()
+			}
 		} else {
 			// A successful upload response may precede the final download bytes.
 			_ = writer.closeWithError(io.ErrClosedPipe)
@@ -509,17 +520,19 @@ func (c *BrowserXHTTPClient) startPacketUp(ctx context.Context, sessionID string
 			}
 			post, err := c.startPacket(sessionID, seqText, payload)
 			if err != nil {
-				conn.setError(err)
-				_ = batch.closeWithError(err)
-				conn.reader.cancel()
-				conn.cancel()
+				if ctx.Err() == nil {
+					conn.setError(err)
+					_ = batch.closeWithError(err)
+					conn.reader.cancel()
+					conn.cancel()
+				}
 				return
 			}
 			uploads.Add(1)
 			go func() {
 				defer uploads.Done()
 				defer func() { <-slots }()
-				if err := post.wait(ctx); err != nil {
+				if err := post.wait(ctx); err != nil && ctx.Err() == nil {
 					conn.setError(err)
 					_ = batch.closeWithError(err)
 					conn.reader.cancel()
@@ -605,16 +618,17 @@ func (c *BrowserXHTTPClient) removeConn(conn *browserXHTTPConn) {
 }
 
 type browserXHTTPConn struct {
-	client     *BrowserXHTTPClient
-	reader     browserRequest
-	post       browserRequest
-	writer     io.WriteCloser
-	local      net.Addr
-	remote     net.Addr
-	cancel     context.CancelFunc
-	mode       string
-	ctx        context.Context
-	uploadDone chan struct{}
+	client       *BrowserXHTTPClient
+	reader       browserRequest
+	post         browserRequest
+	writer       io.WriteCloser
+	local        net.Addr
+	remote       net.Addr
+	cancel       context.CancelFunc
+	mode         string
+	ctx          context.Context
+	uploadDone   chan struct{}
+	uploadCancel context.CancelFunc
 
 	mu                      sync.Mutex
 	closeOnce               sync.Once
@@ -638,16 +652,21 @@ func (c *browserXHTTPConn) Read(p []byte) (int, error) {
 		n, err := c.reader.readContext(ctx, p)
 		if err != nil {
 			c.mu.Lock()
+			deadlineChanged := c.readCtx != ctx
 			if c.err != nil {
 				err = c.err
 			}
 			c.mu.Unlock()
-		}
-		if errors.Is(err, context.Canceled) && c.ctx.Err() == nil {
-			continue
+			if errors.Is(err, context.Canceled) && deadlineChanged && c.ctx.Err() == nil {
+				continue
+			}
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			return n, &timeoutError{}
+		}
+		if err != nil {
+			c.setError(err)
+			_ = c.Close()
 		}
 		return n, err
 	}
@@ -669,13 +688,14 @@ func (c *browserXHTTPConn) Write(p []byte) (int, error) {
 		total += n
 		if err != nil {
 			c.mu.Lock()
+			deadlineChanged := c.writeCtx != ctx
 			if c.err != nil {
 				err = c.err
 			}
 			c.mu.Unlock()
-		}
-		if errors.Is(err, context.Canceled) && c.ctx.Err() == nil {
-			continue
+			if errors.Is(err, context.Canceled) && deadlineChanged && c.ctx.Err() == nil {
+				continue
+			}
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			return total, &timeoutError{}
@@ -684,10 +704,22 @@ func (c *browserXHTTPConn) Write(p []byte) (int, error) {
 	}
 }
 
+func (c *browserXHTTPConn) stopUpload(err error) {
+	if err == nil || errors.Is(err, io.EOF) {
+		err = io.ErrClosedPipe
+	}
+	_ = c.writer.(*browserBatch).closeWithError(err)
+	c.uploadCancel()
+	if c.post != nil {
+		c.post.cancel()
+	}
+}
+
 func (c *browserXHTTPConn) Close() error {
 	c.closeOnce.Do(func() {
 		c.setError(net.ErrClosed)
 		c.cancel()
+		c.uploadCancel()
 		c.mu.Lock()
 		c.readCancel()
 		c.writeCancel()
@@ -792,7 +824,10 @@ func newBrowserBatch(max int) *browserBatch {
 	if max < 1 {
 		max = 1
 	}
-	b := &browserBatch{max: max, data: make([]byte, 0, max), notify: make(chan struct{})}
+	// Packet-up's default limit is 1 MB, but most sessions begin with a small
+	// handshake. Grow on demand instead of reserving the full POST limit for
+	// every idle session. The write/backpressure limit remains max.
+	b := &browserBatch{max: max, data: make([]byte, 0, min(max, streamingReadBufferSize)), notify: make(chan struct{})}
 	return b
 }
 
