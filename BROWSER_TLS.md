@@ -151,7 +151,9 @@ Verified with Linux/amd64 CGO and PureGo builds:
   error, and ordinary Browser initialization still works.
 - Standalone native fixture: valid handshake/application data, bad certificate
   HMAC, bad CertificateVerify, bad Finished, and rejected HRR, each with default
-  dual shares and hybrid-only shares. All ten cases pass. Bad CertificateVerify
+  dual, X25519-only and hybrid-only shares, with plain and Brotli-compressed
+  certificates. All thirty cases pass. Two additional cases reject unusable
+  authentication keys/shares before sending ClientHello. Bad CertificateVerify
   and Finished fail even after successful REALITY certificate authentication.
 - Native Go integration suites, sing-box transport/TLS/VLESS tests and existing
   Strict ECH regression tests pass with the race detector.
@@ -190,6 +192,22 @@ cancel camouflage, while closing all engine connections or the engine does.
 it installs a local test CA through the lower-level engine API, without weakening
 production Browser REALITY validation. Run it with `with_cronet_test`, optionally
 `with_purego`; allow at least 60 seconds for the suite including the timeout test.
+
+### Native path review, 2026-10-10
+
+The REALITY cryptographic paths and camouflage policy passed the expanded native
+fixture and both connection-path variants. Enabling HappyEyeballsV3 exposed two
+Chromium 150 compatibility issues outside BoringSSL: BidirectionalStream was sent
+to the HTTP-stream-only new pool, and a URLRequest/BidirectionalStream race could
+register the same HTTP/2 session key twice. The pinned native source keeps bidirectional jobs on
+the legacy path and reuse an existing HTTP/2 session when the other path wins.
+Normal HTTP requests still use TlsStreamAttempt under V3.
+
+NetLog assertions confirm both SSLConnectJob and TlsStreamAttempt. The actual
+sing-box REALITY/XHTTP, VLESS and EWP interop suites, including framed streaming,
+pass with the rebuilt native libraries. The collision regression also
+passed ten consecutive framed stream-up runs. Consumers need native modules
+built from the updated submodule revision to receive these pool fixes.
 
 Go tests are in sing-box's `transport/v2rayxhttp/browser_reality_test.go` and
 `protocol/vless/browser_reality_test.go`. Run them with
@@ -230,6 +248,47 @@ The installed Chromium advertises 32 trust-anchor IDs in the captured baseline.
 With `--disable-features=TLSTrustAnchorIDs`, all three normalized Chromium profiles
 match Cronet. This control identifies the observed configuration difference;
 default installed Chromium and Cronet are not byte-identical fingerprints.
+
+Rechecked on 2026-10-14 with the published Linux/amd64 library and a fresh
+Chromium 152.0.7977.82 profile. The live engine reports 150.0.7871.63. Chromium's
+`0xca34` extension contains 206 bytes: a two-byte length followed by 204 bytes
+encoding 32 IDs. Cronet omits that extension. Chromium also includes a GREASE
+signature algorithm, making its raw signature_algorithms payload 26 bytes versus
+Cronet's 24; their non-GREASE algorithms match. These are wire observations for
+the tested builds, not fixed lengths to insert into a fingerprint template.
+
+Chromium 152's `SSLContextConfig::SelectAllTrustAnchorIDs()` advertises configured
+IDs from its root-store policy, gated by the Trust Anchor IDs / non-MTC / MTC
+features. The v150 implementation instead selects the intersection with endpoint
+metadata or a retry advertisement. Cronet uses `SSLConfigServiceDefaults`, whose
+context has no root-store IDs, and v150 disables the feature by default. Moving
+to a newer native version alone therefore does not supply the browser's root
+store configuration. Matching this extension requires wiring the actual trusted
+root IDs and feature policy into the native SSL context; the supported anchors
+must agree with certificate verification. A captured byte array or length is
+insufficient, especially across platforms and root-store updates.
+
+Version-specific clarification from upstream tags `149.0.7827.200`,
+`150.0.7871.63` and `150.0.7871.186`: these versions already support nonempty
+TAI lists, but do not normally advertise the entire list in the first handshake.
+With the feature enabled and local trusted IDs configured, no matching DNS hint
+and no MTC metadata normally produce an empty vector (`00 00`, two bytes of
+extension data). A DNS intersection, certificate-error retry using server TAIs,
+or configured MTC experiment can produce a nonempty list. An absent extension
+and an empty vector are distinct; disabled features or missing local IDs result
+in absence. The v149/v150 source defaults the feature off, and its field-trial
+test configurations can enable it; this does not establish every Chrome user's
+Finch assignment.
+
+The move to advertise all eligible IDs without DNS was
+[28dfe2834c7e](https://github.com/chromium/chromium/commit/28dfe2834c7eae86c0bfdb21317d3362a28499ef),
+at Chromium `152.0.7963.0`. Signature-algorithm GREASE was independently enabled
+by [7dbbf30ea6aa](https://github.com/chromium/chromium/commit/7dbbf30ea6aa146852400b519609fe03915d91c4),
+at `152.0.7923.0`. Neither behavior should be treated as a missing Chromium 150
+feature to copy from the Chromium 152 capture. The empty-list advertisement
+itself predates v149: [9dcef31f7721](https://github.com/chromium/chromium/commit/9dcef31f77214e3a60b33e87be5249dd08408c40)
+added the no-DNS case at `141.0.7356.0`; its rollout is separate from its source
+implementation date.
 
 The source confirms Chromium's own ClientHello configuration is used:
 

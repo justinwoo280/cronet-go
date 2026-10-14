@@ -122,6 +122,15 @@ with the configured session placement and needs an HTTP streaming route.
 POST, body payload placement and gRPC headers; query strings in the service path,
 query padding and `NoGRPCHeader` are rejected.
 
+When the download ends, Browser stops its associated upload, delivers any final
+buffered response bytes, and then returns EOF or the native request error. The
+client can open a new session after that failure. XHTTP has no download byte
+offset or acknowledgement for resuming an interrupted session, so reopening its
+GET would not safely resume the application stream. Long response routes need
+appropriate proxy timeouts and protocol-level keepalives: HTTP/2 PING checks the
+connection, and a stream-up POST response heartbeat does not keep its separate
+GET response active.
+
 ECH is supported over the custom TCP dialer with an HTTPS DNS hostname. Supply
 the wire-format `ECHConfigList` or a `GetECHConfigList(context.Context)` callback
 that resolves and caches it. The callback runs before an XHTTP session starts;

@@ -8,12 +8,15 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -143,6 +146,41 @@ func TestRealityCamouflage(t *testing.T) {
 			}
 			if got := engine.StartWithParams(params); got != ResultSuccess {
 				t.Fatal(got)
+			}
+			if expected := os.Getenv("CRONET_TEST_CONNECT_EVENT"); scenario == "h2" && expected != "" {
+				path := filepath.Join(t.TempDir(), "reality-netlog.json")
+				if !engine.StartNetLogToFile(path, false) {
+					t.Fatal("start REALITY NetLog")
+				}
+				defer func() {
+					engine.StopNetLog()
+					data, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var log struct {
+						Constants struct {
+							Types map[string]int `json:"logEventTypes"`
+						} `json:"constants"`
+						Events []struct {
+							Type int `json:"type"`
+						} `json:"events"`
+					}
+					if err := json.Unmarshal(data, &log); err != nil {
+						t.Fatal(err)
+					}
+					id, ok := log.Constants.Types[expected]
+					if !ok {
+						t.Fatalf("unknown native connection event %q", expected)
+					}
+					for _, event := range log.Events {
+						if event.Type == id {
+							t.Logf("REALITY native path confirmed: %s", expected)
+							return
+						}
+					}
+					t.Fatalf("REALITY did not use native path %s", expected)
+				}()
 			}
 			stopped := false
 			defer func() {

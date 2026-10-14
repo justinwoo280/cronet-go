@@ -166,3 +166,19 @@ func TestBrowserWriteDeadlineInterruptAndReset(t *testing.T) {
 		t.Fatalf("write after reset = %d, %v", n, err)
 	}
 }
+
+func BenchmarkBrowserBatchSmallSession(b *testing.B) {
+	payload := make([]byte, 1024)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	for i := 0; i < b.N; i++ {
+		batch := newBrowserBatch(1_000_000)
+		if _, err := batch.Write(payload); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := batch.drain(); err != nil {
+			b.Fatal(err)
+		}
+		_ = batch.Close()
+	}
+}
