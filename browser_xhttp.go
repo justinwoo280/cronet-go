@@ -100,6 +100,9 @@ type BrowserXHTTPOptions struct {
 	// DisableQUIC is required when only a custom TCP dialer is available.
 	DisableQUIC             bool
 	TrustedRootCertificates string
+	// UseTrustedRootCertificates installs TrustedRootCertificates as the only
+	// trust anchors, even when the PEM string is empty.
+	UseTrustedRootCertificates bool
 	// ECHConfigList is a wire-format ECHConfigList. GetECHConfigList may instead
 	// resolve it on demand (and handle DNS TTLs). Both require HTTPS and DialContext.
 	// The callback runs before requests start; errors and empty lists fail the dial.
@@ -114,6 +117,10 @@ type BrowserXHTTPOptions struct {
 	// routing and DNS. Cronet retains the URL hostname for TLS and HTTP authority.
 	// It is mutually exclusive with Dialer and a supplied Engine, and disables QUIC.
 	DialContext func(context.Context) (net.Conn, error)
+}
+
+func (o BrowserXHTTPOptions) usesTrustedRootCertificates() bool {
+	return o.UseTrustedRootCertificates || o.TrustedRootCertificates != ""
 }
 
 // BrowserXHTTPClient is a Cronet-backed XHTTP client transport. It implements
@@ -269,7 +276,7 @@ func NewBrowserXHTTPClient(ctx context.Context, baseURL string, options BrowserX
 			}
 			c.engine.SetDialer(c.dialSocket)
 		}
-		if options.TrustedRootCertificates != "" && !c.engine.SetTrustedRootCertificates(options.TrustedRootCertificates) {
+		if options.usesTrustedRootCertificates() && !c.engine.SetTrustedRootCertificates(options.TrustedRootCertificates) {
 			params.Destroy()
 			c.engine.Destroy()
 			cancel()
@@ -1250,6 +1257,9 @@ func contextError(ctx context.Context) error {
 }
 
 func validateBrowserOptions(o BrowserXHTTPOptions) error {
+	if o.Engine != (Engine{}) && o.usesTrustedRootCertificates() {
+		return errors.New("cronet xhttp: custom roots require an owned engine")
+	}
 	if o.GRPCFraming {
 		if o.Mode != BrowserXHTTPModeStreamUp && o.Mode != BrowserXHTTPModeStreamOne {
 			return errors.New("cronet xhttp: grpc_framing requires stream-up or stream-one")
@@ -1274,7 +1284,7 @@ func validateBrowserOptions(o BrowserXHTTPOptions) error {
 		if o.Engine != (Engine{}) {
 			return errors.New("cronet xhttp: REALITY requires an owned engine")
 		}
-		if len(o.ECHConfigList) != 0 || o.GetECHConfigList != nil || o.TrustedRootCertificates != "" {
+		if len(o.ECHConfigList) != 0 || o.GetECHConfigList != nil || o.usesTrustedRootCertificates() {
 			return errors.New("cronet xhttp: REALITY is incompatible with ECH and custom roots")
 		}
 	}

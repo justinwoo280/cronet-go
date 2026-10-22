@@ -33,6 +33,30 @@ func TestBrowserXHTTPCodecMetadataPlacements(t *testing.T) {
 	}
 }
 
+func TestBrowserXHTTPUsesTrustedRootCertificates(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		options BrowserXHTTPOptions
+		want    bool
+	}{
+		{name: "default", want: false},
+		{name: "pem", options: BrowserXHTTPOptions{TrustedRootCertificates: "pem"}, want: true},
+		{name: "empty", options: BrowserXHTTPOptions{UseTrustedRootCertificates: true}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.options.usesTrustedRootCertificates(); got != test.want {
+				t.Fatalf("usesTrustedRootCertificates() = %v, want %v", got, test.want)
+			}
+		})
+	}
+	if err := validateBrowserOptions(BrowserXHTTPOptions{
+		Engine:                     Engine{ptr: 1},
+		UseTrustedRootCertificates: true,
+	}); err == nil || !strings.Contains(err.Error(), "owned engine") {
+		t.Fatalf("shared engine with custom roots error = %v", err)
+	}
+}
+
 func TestBrowserXHTTPCodecPadding(t *testing.T) {
 	u, err := url.Parse("https://example.com/xhttp/session")
 	if err != nil {

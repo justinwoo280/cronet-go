@@ -52,7 +52,9 @@ CRONET_EXPORT stream_engine* Cronet_Engine_GetStreamEngine(
 // Returns a pointer to the created net::CertVerifier.
 // The caller is responsible for passing it to
 // Cronet_Engine_SetMockCertVerifierForTesting() which takes ownership.
-// Returns nullptr if the PEM data is invalid or no valid certificates found.
+// An empty PEM string installs an empty trust store, so every certificate chain
+// is rejected. Returns nullptr if non-empty PEM data is invalid or contains no
+// valid certificates.
 CRONET_EXPORT void* Cronet_CreateCertVerifierWithRootCerts(
     const char* pem_root_certs);
 
