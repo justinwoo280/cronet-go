@@ -1,5 +1,10 @@
 # Browser TLS verification
 
+The records below describe the Chromium 150 builds that were tested at the time.
+The current source has moved to Chromium 154.0.8037.49; its regression workflow is
+`.github/workflows/chromium-154.yml`. In 154, REALITY authentication failure uses
+`-10000` instead of the historical `-189`, which is now a Chromium error code.
+
 Verified locally on Linux/amd64 on 2026-09-19 using this checkout's native library
 and Debian Chromium. These results describe the tested builds and fresh TCP/TLS
 connections; browser releases and field trials can change the ClientHello.

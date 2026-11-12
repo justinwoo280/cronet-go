@@ -57,7 +57,7 @@ static void Message(int write, int, int type, const void* buf, size_t len,
     // CertificateVerify is already signed. Alter only the server's transcript
     // before it calculates Finished, retaining valid record-layer encryption.
     const uint8_t extra[] = {0};
-    assert(ssl->s3->hs->transcript.Update(extra));
+    assert(bssl::FromOpaque(ssl)->s3->hs->transcript.Update(extra));
   }
 }
 
@@ -75,7 +75,7 @@ static int SelectCertificate(SSL* ssl, void*) {
   // The REALITY fixture deliberately signs Ed25519 despite its omission from
   // the client's advertisement. This does not change any transcript bytes.
   const uint16_t sig = SSL_SIGN_ED25519;
-  return ssl->s3->hs->peer_sigalgs.CopyFrom(bssl::Span(&sig, 1));
+  return bssl::FromOpaque(ssl)->s3->hs->peer_sigalgs.CopyFrom(bssl::Span(&sig, 1));
 }
 
 static void Transfer(BIO* from, BIO* to) {

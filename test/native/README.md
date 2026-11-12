@@ -1,5 +1,8 @@
 # Native TLS regression tests
 
+For a packaged Linux/amd64 build, run both TLS fixtures and the alternate
+connection-path regression suite with `bash test/native/check_linux.sh`.
+
 Run from the cronet-go repository root after building the Linux static library.
 The commands use the packaged archive by default. For an unpackaged local rebuild,
 set `CRONET_TEST_STATIC_LIB` to

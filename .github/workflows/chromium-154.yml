@@ -1,0 +1,88 @@
+name: Chromium 154 validation
+
+on:
+  push:
+    branches: [chromium-154]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chromium-154-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache-dependency-path: |
+            go.sum
+            test/go.sum
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build ccache gpgv python3-requests
+      - name: Cache toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            naiveproxy/src/third_party/llvm-build
+            naiveproxy/src/gn/out
+            naiveproxy/src/chrome/build/pgo_profiles
+            naiveproxy/src/out/sysroot-build
+          key: chromium-154-toolchain-${{ hashFiles('naiveproxy/src/get-clang.sh', 'naiveproxy/src/DEPS', 'naiveproxy/src/tools/clang/scripts/update.py') }}
+      - name: Restore compiler cache
+        id: ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: chromium-154-ccache-${{ github.sha }}
+          restore-keys: chromium-154-ccache-
+      - name: Test build tool and Go bindings
+        run: go test -tags with_purego ./...
+      - name: Check generated error codes
+        run: |
+          go run ./cmd/build-naive generate-net-errors
+          git diff --exit-code -- net_error_generated.go
+      - name: Build native libraries
+        run: go run ./cmd/build-naive --target=linux/amd64 build --jobs=3
+      - name: Save compiler cache
+        if: always() && steps.ccache.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: chromium-154-ccache-${{ github.sha }}
+      - name: Package local libraries
+        run: go run ./cmd/build-naive --target=linux/amd64 package --local
+      - name: CGO integration tests
+        run: |
+          eval "$(go run ./cmd/build-naive --target=linux/amd64 env --export)"
+          go test -race -tags with_cronet_test -count=1 -timeout=5m ./...
+          go -C test test -count=1 -run '^(TestEngineVersion|TestDateTime)$' .
+      - name: PureGo integration tests
+        run: |
+          export LD_LIBRARY_PATH="$PWD/lib/linux_amd64"
+          go test -race -tags 'with_purego with_cronet_test' -count=1 -timeout=5m ./...
+          go -C test test -tags with_purego -count=1 -run '^(TestEngineVersion|TestDateTime)$' .
+      - name: Native TLS fixtures and alternate connection path
+        run: bash test/native/check_linux.sh
+      - name: Upload validation libraries
+        uses: actions/upload-artifact@v4
+        with:
+          name: chromium-154-linux-amd64
+          path: |
+            lib/
+            include/
+            lib_linux_amd64_cgo.go
+          retention-days: 7
