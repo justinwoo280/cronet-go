@@ -52,6 +52,10 @@ export CRONET_TEST_CONNECT_EVENT=TLS_STREAM_ATTEMPT_CONNECT
 symbol=_ZN4base11FeatureList12InitInstanceERKNSt4__Cr12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEES9_
 go test -race -tags with_cronet_test -count=1 -timeout=5m \
   -ldflags "-extldflags '$artifacts/features.o -Wl,--wrap=$symbol'" \
-  -run '^Test(Reality|BrowserStrictECHReuse|BrowserDuplex)' .
+  -run '^Test(Reality|BrowserStrictECHReuse|BrowserDuplex|BrowserTrustAnchorIDs)' .
+
+go -C test test -race -count=1 -timeout=5m \
+  -ldflags "-extldflags '$artifacts/features.o -Wl,--wrap=$symbol'" \
+  -run '^TestNaiveQUIC(LargeTransfer)?$' .
 
 CRONET_TEST_FEATURE_OBJECT="$artifacts/features.o" bash test/native/check_sing_box.sh

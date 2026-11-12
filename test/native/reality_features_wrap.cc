@@ -1,5 +1,6 @@
 // Test-only linker wrapper for exercising TlsStreamAttempt without changing the
 // published native library's disabled-by-default Happy Eyeballs V3 policy.
+// Also exercise Chromium 154's ReadMultiple API on the custom UDP transport.
 #include <string>
 
 extern "C" bool RealityTestRealInit(const std::string&, const std::string&)
@@ -10,5 +11,5 @@ extern "C" bool RealityTestWrappedInit(const std::string&, const std::string&)
 
 extern "C" bool RealityTestWrappedInit(const std::string& enabled,
                                       const std::string& disabled) {
-  return RealityTestRealInit(enabled + ",HappyEyeballsV3", disabled);
+  return RealityTestRealInit(enabled + ",HappyEyeballsV3,QuicUseReadMultiple", disabled);
 }

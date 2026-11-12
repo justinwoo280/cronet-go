@@ -70,12 +70,12 @@ jobs:
         run: |
           eval "$(go run ./cmd/build-naive --target=linux/amd64 env --export)"
           go test -race -tags with_cronet_test -count=1 -timeout=5m ./...
-          go -C test test -count=1 -run '^(TestEngineVersion|TestDateTime)$' .
+          go -C test test -race -count=1 -timeout=5m -run '^(TestEngineVersion|TestDateTime|TestNaiveCustomDialer|TestNaiveECH|TestNaiveQUIC|TestNaiveQUICLargeTransfer|TestQUICReceiveWindowCustomValues)$' .
       - name: PureGo integration tests
         run: |
           export LD_LIBRARY_PATH="$PWD/lib/linux_amd64"
           go test -race -tags 'with_purego with_cronet_test' -count=1 -timeout=5m ./...
-          go -C test test -tags with_purego -count=1 -run '^(TestEngineVersion|TestDateTime)$' .
+          go -C test test -race -tags with_purego -count=1 -timeout=5m -run '^(TestEngineVersion|TestDateTime|TestNaiveCustomDialer|TestNaiveECH|TestNaiveQUIC|TestNaiveQUICLargeTransfer|TestQUICReceiveWindowCustomValues)$' .
       - name: Native TLS fixtures and alternate connection path
         run: bash test/native/check_linux.sh
       - name: Upload validation libraries
@@ -86,4 +86,57 @@ jobs:
             lib/
             include/
             lib_linux_amd64_cgo.go
+          retention-days: 7
+
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build ccache gpgv python3-requests
+      - name: Cache Android toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            naiveproxy/src/third_party/llvm-build
+            naiveproxy/src/third_party/android_toolchain/ndk
+            naiveproxy/src/gn/out
+            naiveproxy/src/chrome/build/pgo_profiles
+            naiveproxy/src/out/sysroot-build
+          key: chromium-154-android-toolchain-${{ hashFiles('naiveproxy/src/get-clang.sh', 'naiveproxy/src/DEPS', 'naiveproxy/src/tools/clang/scripts/update.py') }}
+      - name: Restore compiler cache
+        id: ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: chromium-154-android-ccache-${{ github.sha }}
+          restore-keys: chromium-154-android-ccache-
+      - name: Build Android arm64
+        run: go run ./cmd/build-naive --target=android/arm64 build --jobs=3
+      - name: Save compiler cache
+        if: always() && steps.ccache.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: chromium-154-android-ccache-${{ github.sha }}
+      - name: Package local libraries
+        run: go run ./cmd/build-naive --target=android/arm64 package --local
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chromium-154-android-arm64
+          path: |
+            lib/
+            include/
+            lib_android_arm64_cgo.go
           retention-days: 7
