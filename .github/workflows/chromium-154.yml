@@ -4,6 +4,7 @@ on:
   push:
     branches: [chromium-154]
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
