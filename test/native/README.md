@@ -1,7 +1,10 @@
 # Native TLS regression tests
 
-For a packaged Linux/amd64 build, run both TLS fixtures and the alternate
-connection-path regression suite with `bash test/native/check_linux.sh`.
+For a packaged Linux/amd64 or Linux/arm64 build, run both TLS fixtures and the
+alternate connection-path regression suite with `bash test/native/check_linux.sh`.
+It also downloads a pinned sing-box checkout and runs the actual REALITY/XHTTP
+and VLESS interoperability tests with CGO, PureGo, and Happy Eyeballs V3. To run
+only the downstream tests, use `bash test/native/check_sing_box.sh`.
 
 Run from the cronet-go repository root after building the Linux static library.
 The commands use the packaged archive by default. For an unpackaged local rebuild,
