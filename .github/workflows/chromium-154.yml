@@ -132,6 +132,18 @@ jobs:
           key: chromium-154-android-ccache-${{ github.sha }}
       - name: Package local libraries
         run: go run ./cmd/build-naive --target=android/arm64 package --local
+      - name: Setup Android NDK for CGO linking
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r28
+      - name: Link Android CGO test binary
+        env:
+          CC: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android23-clang
+          CGO_ENABLED: '1'
+          GOOS: android
+          GOARCH: arm64
+        run: go -C test test -c -o "$RUNNER_TEMP/cronet-android-arm64.test" .
       - uses: actions/upload-artifact@v4
         with:
           name: chromium-154-android-arm64
