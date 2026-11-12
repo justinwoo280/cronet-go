@@ -6,6 +6,30 @@ The current source has moved to Chromium 154.0.8037.49; its regression workflow 
 `.github/workflows/chromium-154.yml`. In 154, REALITY authentication failure uses
 `-10000` instead of the historical `-189`, which is now a Chromium error code.
 
+## Chromium 154 verification, 2026-11-12
+
+[Validation run 43250768062](https://github.com/justinwoo280/cronet-go/actions/runs/43250768062)
+passed for parent revision `6e87a9666ad9e31ca6b7b7158be8712af0372bb3`, with native
+revision `53e1e953` and Chrome Root Store v45:
+
+- Linux/amd64 static and shared builds; CGO and PureGo native suites with the race
+  detector, including Browser/XHTTP, Strict ECH and REALITY camouflage lifecycle.
+- Captured ClientHello Trust Anchor IDs match the root-store metadata for ordinary
+  Browser, ECH and REALITY. Explicit public/mixed PEM stores advertise only their
+  matching IDs; private-only and empty stores omit the extension. Packet-up and
+  stream-one cover both URLRequest and bidirectional APIs.
+- All eight standalone Strict ECH checks and all 32 REALITY cryptographic fixture
+  cases pass, including bad HMAC, CertificateVerify, Finished and HRR cases.
+- Happy Eyeballs V3 tests pass, including the trust-anchor wire checks. QUIC basic
+  and large-transfer tests also pass with `QuicUseReadMultiple` enabled.
+- Actual sing-box/sing-xhttp and VLESS interoperability passes with CGO, PureGo and
+  the alternate native connection path, using pinned sing-box revision
+  `437d58e02ff2c41795b91415fbf0bfc49936ffaa`.
+- Android arm64 native build and Go CGO test-binary linking pass at API 23.
+  This is a build/link check, not an Android runtime test.
+
+## Historical Chromium 150 verification
+
 Verified locally on Linux/amd64 on 2026-09-19 using this checkout's native library
 and Debian Chromium. These results describe the tested builds and fresh TCP/TLS
 connections; browser releases and field trials can change the ClientHello.
