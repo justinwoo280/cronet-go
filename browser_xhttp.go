@@ -98,7 +98,11 @@ type BrowserXHTTPOptions struct {
 	Dialer    Dialer
 	UserAgent string
 	// DisableQUIC is required when only a custom TCP dialer is available.
-	DisableQUIC             bool
+	DisableQUIC bool
+	// ALPN selects the HTTP protocols. Empty retains Cronet's defaults. Use
+	// ["h3"] for HTTP/3 without TCP fallback, or an ordered subset of ["h2",
+	// "http/1.1"] for TLS over TCP. Explicit ALPN requires an owned engine.
+	ALPN                    []string
 	TrustedRootCertificates string
 	// UseTrustedRootCertificates installs TrustedRootCertificates as the only
 	// trust anchors, even when the PEM string is empty.
@@ -115,8 +119,16 @@ type BrowserXHTTPOptions struct {
 	Reality *BrowserRealityOptions
 	// DialContext opens the configured endpoint using the embedding application's
 	// routing and DNS. Cronet retains the URL hostname for TLS and HTTP authority.
-	// It is mutually exclusive with Dialer and a supplied Engine, and disables QUIC.
+	// It is mutually exclusive with Dialer and a supplied Engine. QUIC is disabled
+	// unless DialUDPContext is also supplied.
 	DialContext func(context.Context) (net.Conn, error)
+	// DialUDPContext opens a connected, packet-preserving UDP transport to the
+	// configured endpoint. Each Read and Write represents exactly one datagram.
+	// A concrete *net.UDPConn is handed to Cronet; wrappers are relayed without
+	// bypassing their behavior. The callback owns routing and DNS, as DialContext
+	// does for TCP. With only this callback supplied, TCP fallback is disabled.
+	// It requires an owned engine and cannot be combined with Dialer or ECH.
+	DialUDPContext func(context.Context) (net.Conn, error)
 }
 
 func (o BrowserXHTTPOptions) usesTrustedRootCertificates() bool {
@@ -191,6 +203,9 @@ func NewBrowserXHTTPClient(ctx context.Context, baseURL string, options BrowserX
 	if options.GRPCFraming && u.RawQuery != "" {
 		return nil, errors.New("cronet xhttp: grpc_framing does not support a URL query")
 	}
+	if len(options.ALPN) != 0 && u.Scheme != "https" {
+		return nil, errors.New("cronet xhttp: ALPN requires HTTPS")
+	}
 	if (len(options.ECHConfigList) > 0 || options.GetECHConfigList != nil) && (u.Scheme != "https" || net.ParseIP(u.Hostname()) != nil) {
 		return nil, errors.New("cronet xhttp: ECH requires an HTTPS URL with a DNS hostname")
 	}
@@ -205,6 +220,7 @@ func NewBrowserXHTTPClient(ctx context.Context, baseURL string, options BrowserX
 		options.Reality = &reality
 	}
 	options.Headers = cloneHTTPHeaders(options.Headers)
+	options.ALPN = append([]string(nil), options.ALPN...)
 	options.ECHConfigList = append([]byte(nil), options.ECHConfigList...)
 	if options.Method == "" {
 		options.Method = http.MethodPost
@@ -242,8 +258,16 @@ func NewBrowserXHTTPClient(ctx context.Context, baseURL string, options BrowserX
 		params := NewEngineParams()
 		params.SetEnableCheckResult(false)
 		params.SetEnableHTTP2(true)
-		params.SetEnableQuic(!options.DisableQUIC && options.Dialer == nil && options.DialContext == nil && options.Reality == nil)
+		params.SetEnableQuic((len(options.ALPN) == 0 || options.http3()) && !options.DisableQUIC && options.Dialer == nil && (options.DialContext == nil || options.DialUDPContext != nil) && options.Reality == nil)
 		params.SetEnableBrotli(true)
+		if len(options.ALPN) != 0 {
+			if err := c.engine.SetALPN(options.ALPN); err != nil {
+				params.Destroy()
+				c.engine.Destroy()
+				cancel()
+				return nil, err
+			}
+		}
 		if options.Reality != nil {
 			if err := c.engine.SetReality(options.Reality.PublicKey, options.Reality.ShortID); err != nil {
 				params.Destroy()
@@ -266,7 +290,7 @@ func NewBrowserXHTTPClient(ctx context.Context, baseURL string, options BrowserX
 		if options.Dialer != nil {
 			c.engine.SetDialer(options.Dialer)
 		}
-		if options.DialContext != nil {
+		if options.DialContext != nil || options.DialUDPContext != nil {
 			// The application resolves the real endpoint. A loopback placeholder
 			// keeps Cronet from resolving the SNI name through the system DNS.
 			if len(options.ECHConfigList) > 0 || options.GetECHConfigList != nil {
@@ -275,6 +299,12 @@ func NewBrowserXHTTPClient(ctx context.Context, baseURL string, options BrowserX
 				_ = params.SetHostResolverRules("MAP * 127.0.0.1")
 			}
 			c.engine.SetDialer(c.dialSocket)
+		}
+		if options.http3() {
+			c.engine.SetDialer(c.dialSocket)
+		}
+		if options.DialUDPContext != nil {
+			c.engine.SetUDPDialer(c.dialUDPSocket)
 		}
 		if options.usesTrustedRootCertificates() && !c.engine.SetTrustedRootCertificates(options.TrustedRootCertificates) {
 			params.Destroy()
@@ -1257,6 +1287,37 @@ func contextError(ctx context.Context) error {
 }
 
 func validateBrowserOptions(o BrowserXHTTPOptions) error {
+	if err := validateALPN(o.ALPN); err != nil {
+		return err
+	}
+	if len(o.ALPN) != 0 && o.Engine != (Engine{}) {
+		return errors.New("cronet xhttp: ALPN requires an owned engine")
+	}
+	if len(o.ALPN) == 1 && o.ALPN[0] == "http/1.1" && (o.Mode == BrowserXHTTPModeStreamOne || o.GRPCFraming) {
+		return errors.New("cronet xhttp: bidirectional streaming requires h2 or h3 in ALPN")
+	}
+	if o.http3() {
+		if o.Engine != (Engine{}) || o.Dialer != nil {
+			return errors.New("cronet xhttp: h3 ALPN requires an owned engine and no Dialer")
+		}
+		if o.DisableQUIC || o.Reality != nil || len(o.ECHConfigList) > 0 || o.GetECHConfigList != nil {
+			return errors.New("cronet xhttp: h3 ALPN is incompatible with DisableQUIC, REALITY and Strict ECH")
+		}
+		if o.DialContext != nil && o.DialUDPContext == nil {
+			return errors.New("cronet xhttp: h3 ALPN with custom routing requires DialUDPContext")
+		}
+	}
+	if o.DialUDPContext != nil {
+		if len(o.ALPN) != 0 && !o.http3() {
+			return errors.New("cronet xhttp: DialUDPContext requires h3 or default ALPN")
+		}
+		if o.Engine != (Engine{}) || o.Dialer != nil {
+			return errors.New("cronet xhttp: DialUDPContext requires an owned engine and no Dialer")
+		}
+		if o.DisableQUIC || o.Reality != nil || len(o.ECHConfigList) > 0 || o.GetECHConfigList != nil {
+			return errors.New("cronet xhttp: DialUDPContext is incompatible with DisableQUIC, REALITY and Strict ECH")
+		}
+	}
 	if o.Engine != (Engine{}) && o.usesTrustedRootCertificates() {
 		return errors.New("cronet xhttp: custom roots require an owned engine")
 	}

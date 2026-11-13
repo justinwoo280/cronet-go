@@ -89,7 +89,11 @@ func (c *BrowserXHTTPClient) resolveECH(_ context.Context, request *mDNS.Msg) *m
 			response.Rcode = mDNS.RcodeServerFailure
 			return response
 		}
-		response = injectECHConfig(request, response, config, []string{"h2"})
+		alpn := c.opts.ALPN
+		if len(alpn) == 0 {
+			alpn = []string{"h2", "http/1.1"}
+		}
+		response = injectECHConfig(request, response, config, alpn)
 		// The embedding application's getter owns the TTL. Do not retain stale
 		// synthetic records after it supplies a refreshed configuration.
 		for _, rr := range response.Answer {

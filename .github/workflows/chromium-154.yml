@@ -2,7 +2,7 @@ name: Chromium 154 validation
 
 on:
   push:
-    branches: [chromium-154]
+    branches: [chromium-154, xhttp-h3]
   workflow_dispatch:
   workflow_call:
 
@@ -70,15 +70,16 @@ jobs:
         run: |
           eval "$(go run ./cmd/build-naive --target=linux/amd64 env --export)"
           go test -race -tags with_cronet_test -count=1 -timeout=5m ./...
-          go -C test test -race -count=1 -timeout=5m -run '^(TestEngineVersion|TestDateTime|TestNaiveCustomDialer|TestNaiveECH|TestNaiveQUIC|TestNaiveQUICLargeTransfer|TestQUICReceiveWindowCustomValues)$' .
+          go -C test test -v -race -count=1 -timeout=5m -run '^(TestBrowser.*|TestEngineVersion|TestDateTime|TestNaiveCustomDialer|TestNaiveECH|TestNaiveQUIC|TestNaiveQUICLargeTransfer|TestQUICReceiveWindowCustomValues)$' .
       - name: PureGo integration tests
         run: |
           export LD_LIBRARY_PATH="$PWD/lib/linux_amd64"
           go test -race -tags 'with_purego with_cronet_test' -count=1 -timeout=5m ./...
-          go -C test test -race -tags with_purego -count=1 -timeout=5m -run '^(TestEngineVersion|TestDateTime|TestNaiveCustomDialer|TestNaiveECH|TestNaiveQUIC|TestNaiveQUICLargeTransfer|TestQUICReceiveWindowCustomValues)$' .
+          go -C test test -v -race -tags with_purego -count=1 -timeout=5m -run '^(TestBrowser.*|TestEngineVersion|TestDateTime|TestNaiveCustomDialer|TestNaiveECH|TestNaiveQUIC|TestNaiveQUICLargeTransfer|TestQUICReceiveWindowCustomValues)$' .
       - name: Native TLS fixtures and alternate connection path
         run: bash test/native/check_linux.sh
       - name: Upload validation libraries
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: chromium-154-linux-amd64

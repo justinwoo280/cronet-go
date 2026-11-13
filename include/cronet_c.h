@@ -27,6 +27,12 @@ typedef struct stream_engine stream_engine;
 CRONET_EXPORT bool Cronet_Engine_SetStrictECH(Cronet_EnginePtr engine,
                                             bool enabled);
 
+// Selects HTTP ALPN before startup. A comma-separated ordered subset of h2 and
+// http/1.1 selects TCP/TLS; h3 alone forces QUIC without TCP fallback. An empty
+// string restores defaults. Returns false for invalid lists or started engines.
+CRONET_EXPORT bool Cronet_Engine_SetALPN(Cronet_EnginePtr engine,
+                                         const char* protocols);
+
 // Requires REALITY authentication for this engine's TLS connections. The engine
 // must be dedicated to one endpoint. Call before StartWithParams, with a 32-byte
 // X25519 public key and eight-byte short ID. QUIC and Strict ECH are incompatible.

@@ -105,10 +105,28 @@ as `net.Conn`. The default mode is `packet-up`. `stream-one` requires HTTPS and
 HTTP/2 or HTTP/3 and allows the first write before receiving response headers.
 It implements XHTTP metadata/padding independently and uses Cronet for TLS,
 HTTP/2, QUIC and connection reuse. An optional `DialContext` callback supplies
-the actual TCP endpoint through the application's routing; this disables QUIC.
+the actual TCP endpoint through the application's routing. Add `DialUDPContext`
+to route UDP through the application as well; TCP-only custom routing disables QUIC.
 Direct TCP sockets are duplicated for Cronet, and other connections are relayed
 through a socketpair. `Host` is independent of the URL's TLS hostname when using
 the native library built from this checkout.
+
+`BrowserXHTTPOptions.ALPN` selects the protocol without a separate H3 switch:
+
+- `[]string{"h3"}` uses HTTP/3 exclusively, including on the first request,
+  with no TCP fallback or dependency on a previous Alt-Svc response.
+- `[]string{"h2"}` offers only HTTP/2 and fails if the peer does not negotiate it.
+- `[]string{"http/1.1"}` selects HTTP/1.1 for packet-up or raw stream-up.
+- `[]string{"h2", "http/1.1"}` allows both TCP protocols in the supplied order.
+- An empty list preserves the existing Cronet defaults. H3 cannot be mixed with
+  TCP ALPN entries. Explicit ALPN requires a native library exposing
+  `Cronet_Engine_SetALPN`; PureGo reports a capability error with older libraries.
+
+`DialUDPContext` returns a connected, packet-preserving `net.Conn`. A concrete
+`*net.UDPConn` is handed to Cronet; proxy wrappers use a datagram relay and retain
+their routing/accounting behavior. Native socket closure releases the relay.
+With `ALPN: []string{"h3"}`, an optional TCP callback is never used. Strict ECH
+and REALITY retain their TCP-only policy and reject H3 configuration.
 
 For gRPC-aware intermediaries, set `BrowserXHTTPOptions.GRPCFraming` and select
 `stream-up` or `stream-one`. Enable the corresponding `grpc_framing` option on the

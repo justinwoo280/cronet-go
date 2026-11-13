@@ -56,6 +56,7 @@ var (
 	cronetEngineCloseAllConnections           func(uintptr)
 	cronetEngineSetDialer                     func(uintptr, uintptr, uintptr)
 	cronetEngineSetStrictECH                  func(uintptr, bool) bool
+	cronetEngineSetALPN                       func(uintptr, string) bool
 	cronetEngineSetReality                    func(uintptr, uintptr, uintptr) bool
 	cronetEngineSetUdpDialer                  func(uintptr, uintptr, uintptr, uintptr)
 
