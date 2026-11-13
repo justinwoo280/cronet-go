@@ -91,6 +91,10 @@ func (e Engine) SetStrictECH(enabled bool) error {
 	return cronet.EngineSetStrictECH(e.ptr, enabled)
 }
 
+func (e Engine) setALPN(protocols string) error {
+	return cronet.EngineSetALPN(e.ptr, protocols)
+}
+
 // SetReality requires REALITY authentication on an engine dedicated to one
 // endpoint. Call before StartWithParams, with QUIC and Strict ECH disabled.
 func (e Engine) SetReality(publicKey [32]byte, shortID [8]byte) error {

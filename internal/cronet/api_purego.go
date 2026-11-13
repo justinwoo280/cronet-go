@@ -88,6 +88,16 @@ func EngineSetStrictECH(engine uintptr, enabled bool) error {
 	return nil
 }
 
+func EngineSetALPN(engine uintptr, protocols string) error {
+	if cronetEngineSetALPN == nil {
+		return errors.New("cronet: native library does not support ALPN selection; update libcronet")
+	}
+	if !cronetEngineSetALPN(engine, protocols) {
+		return errors.New("cronet: ALPN must be valid and configured before engine start")
+	}
+	return nil
+}
+
 func EngineSetUdpDialer(engine, dialer, context, onClose uintptr) {
 	cronetEngineSetUdpDialer(engine, dialer, context, onClose)
 }

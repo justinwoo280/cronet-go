@@ -96,6 +96,15 @@ func (e Engine) SetStrictECH(enabled bool) error {
 	return nil
 }
 
+func (e Engine) setALPN(protocols string) error {
+	value := C.CString(protocols)
+	defer C.free(unsafe.Pointer(value))
+	if !bool(C.Cronet_Engine_SetALPN(C.Cronet_EnginePtr(unsafe.Pointer(e.ptr)), value)) {
+		return errors.New("cronet: ALPN must be valid and configured before engine start")
+	}
+	return nil
+}
+
 // SetReality requires REALITY authentication on an engine dedicated to one
 // endpoint. Call before StartWithParams, with QUIC and Strict ECH disabled.
 func (e Engine) SetReality(publicKey [32]byte, shortID [8]byte) error {

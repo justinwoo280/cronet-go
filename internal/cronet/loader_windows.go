@@ -225,6 +225,7 @@ func registerSymbols() error {
 	}
 	// Optional for old libraries; requesting Strict ECH then fails explicitly.
 	_ = registerFunc(&cronetEngineSetStrictECH, "Cronet_Engine_SetStrictECH")
+	_ = registerFunc(&cronetEngineSetALPN, "Cronet_Engine_SetALPN")
 	_ = registerFunc(&cronetEngineSetReality, "Cronet_Engine_SetReality")
 
 	// EngineParams
