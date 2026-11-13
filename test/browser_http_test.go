@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -275,6 +276,7 @@ func TestBrowserHTTP3(t *testing.T) {
 				packet, err := net.ListenPacket("udp", ":0")
 				require.NoError(t, err)
 				server := &http3.Server{
+					Logger:    slog.Default(),
 					TLSConfig: &tls.Config{Certificates: []tls.Certificate{certificate}, NextProtos: []string{"h3"}},
 					Handler:   browserEchoHandler(t, mode, 3, stream.framed),
 				}
@@ -422,7 +424,7 @@ func TestBrowserHTTP3CancelBeforeResponse(t *testing.T) {
 			packet, err := net.ListenPacket("udp4", "127.0.0.1:0")
 			require.NoError(t, err)
 			entered := make(chan struct{}, 1)
-			server := &http3.Server{TLSConfig: &tls.Config{Certificates: []tls.Certificate{certificate}},
+			server := &http3.Server{TLSConfig: &tls.Config{Certificates: []tls.Certificate{certificate}}, Logger: slog.Default(),
 				Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					select {
 					case entered <- struct{}{}:
@@ -481,7 +483,7 @@ func TestBrowserHTTP3RejectsUntrustedPeer(t *testing.T) {
 	packet, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	require.NoError(t, err)
 	var requests atomic.Int32
-	server := &http3.Server{TLSConfig: &tls.Config{Certificates: []tls.Certificate{certificate}},
+	server := &http3.Server{TLSConfig: &tls.Config{Certificates: []tls.Certificate{certificate}}, Logger: slog.Default(),
 		Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests.Add(1) }),
 	}
 	done := make(chan error, 1)
