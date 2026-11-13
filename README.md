@@ -4,6 +4,14 @@
 
 Go bindings for [naiveproxy](https://github.com/klzgrad/naiveproxy).
 
+The native source tracks Chromium **154.0.8037.49**, based on naiveproxy
+`v154.0.8037.49-5`. Build the Go bindings and native library from the same checkout;
+the downstream REALITY authentication error is now `-10000`, because Chromium
+assigned its former value (`-189`) to `ERR_CONTROL_MSG_TOO_BIG`.
+The embedded Chrome Root Store is v45. ClientHello Trust Anchor IDs are derived
+from that store, or from the matching certificates in an explicitly supplied
+PEM root store.
+
 ## Supported Platforms
 
 | Target        | OS      | CPU   |

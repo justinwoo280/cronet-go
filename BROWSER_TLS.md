@@ -1,5 +1,35 @@
 # Browser TLS verification
 
+The earlier runtime verification records below describe the Chromium 150 builds
+that were tested at the time.
+The current source has moved to Chromium 154.0.8037.49; its regression workflow is
+`.github/workflows/chromium-154.yml`. In 154, REALITY authentication failure uses
+`-10000` instead of the historical `-189`, which is now a Chromium error code.
+
+## Chromium 154 verification, 2026-11-12
+
+[Validation run 43250768062](https://github.com/justinwoo280/cronet-go/actions/runs/43250768062)
+passed for parent revision `6e87a9666ad9e31ca6b7b7158be8712af0372bb3`, with native
+revision `53e1e953` and Chrome Root Store v45:
+
+- Linux/amd64 static and shared builds; CGO and PureGo native suites with the race
+  detector, including Browser/XHTTP, Strict ECH and REALITY camouflage lifecycle.
+- Captured ClientHello Trust Anchor IDs match the root-store metadata for ordinary
+  Browser, ECH and REALITY. Explicit public/mixed PEM stores advertise only their
+  matching IDs; private-only and empty stores omit the extension. Packet-up and
+  stream-one cover both URLRequest and bidirectional APIs.
+- All eight standalone Strict ECH checks and all 32 REALITY cryptographic fixture
+  cases pass, including bad HMAC, CertificateVerify, Finished and HRR cases.
+- Happy Eyeballs V3 tests pass, including the trust-anchor wire checks. QUIC basic
+  and large-transfer tests also pass with `QuicUseReadMultiple` enabled.
+- Actual sing-box/sing-xhttp and VLESS interoperability passes with CGO, PureGo and
+  the alternate native connection path, using pinned sing-box revision
+  `437d58e02ff2c41795b91415fbf0bfc49936ffaa`.
+- Android arm64 native build and Go CGO test-binary linking pass at API 23.
+  This is a build/link check, not an Android runtime test.
+
+## Historical Chromium 150 verification
+
 Verified locally on Linux/amd64 on 2026-09-19 using this checkout's native library
 and Debian Chromium. These results describe the tested builds and fresh TCP/TLS
 connections; browser releases and field trials can change the ClientHello.
@@ -322,3 +352,53 @@ go run -tags with_purego /tmp/opencode/cronet_clienthello_probe.go
 # Pass the newly printed artifact directory:
 python3 /tmp/opencode/cronet_clienthello_compare.py /tmp/opencode/cronet-clienthello-3592642712
 ```
+
+## Chromium 154 Trust Anchor IDs: source audit
+
+For Chromium `154.0.8037.49`, `kTLSTrustAnchorIDs` and
+`kNonMtcTrustAnchorIDs` are enabled by default; `kVerifyMTCs` is disabled by
+default. On Chrome Root Store builds, the browser's
+`SSLConfigServiceManager` initializes the SSL context with the root store's
+nonempty classic trust-anchor identifiers. MTC identifiers are conditional on
+their separate feature and configuration.
+
+Both `SSLConnectJob` and `TlsStreamAttempt` select the entire configured list
+for the initial ClientHello, without requiring matching DNS HTTPS metadata.
+`SSLContextConfig::ShouldAdvertiseTrustAnchorIDs()` requires both the feature
+and a nonempty configured list: an unconfigured context omits the extension
+rather than sending an empty capability advertisement.
+
+The extension is `trust_anchors` (`0xca34`). Its payload is a two-byte vector
+length followed by one-byte-length-prefixed relative-OID identifiers, sorted
+lexicographically by their encoded bytes. These are actual root-store IDs;
+for example GTS Root R1 uses `11129.9.1`, encoded as `d6 79 09 01`. The tag's
+compiled Root Store v39 contains 28 advertised classic IDs, corresponding to
+186 payload bytes including the vector length. This is a source-derived value,
+not a packet capture or a fixed fingerprint template; root-store updates and
+feature configuration can change it.
+
+Upstream `SSLConfigServiceDefaults` starts with empty `trust_anchor_ids`.
+The standalone Cronet integration now fills its SSL context explicitly from the
+compiled Chrome Root Store, following the same feature gates as the browser.
+Its classic store is updated to v45 from Chromium commit
+`3f600389c807d0fa50d1c0fed9024e53910f9338` (2026-11-12).
+
+When an explicit PEM root store is installed, only IDs for exact matching trusted
+certificates are advertised. Empty or private-only stores omit the extension.
+The fixed Strict ECH and REALITY configurations retain the same root-derived
+settings. The separate MTC signer data stays compatible with Chromium 154, whose
+MTC verification feature is disabled by default.
+
+`browser_trust_anchor_integration_test.go` captures actual TCP ClientHello bytes
+for ordinary Browser requests, ECH and REALITY, including explicit-root cases
+and both URLRequest and bidirectional-stream paths. Its expected IDs are read
+independently from the root-store metadata. The validation workflow runs these
+checks with CGO/PureGo and the Happy Eyeballs V3 test variant. Chromium 150's wire
+captures above are not evidence for the new Chromium 154 build.
+
+Upstream references at the exact tag:
+
+- [Feature defaults](https://github.com/chromium/chromium/blob/154.0.8037.49/net/base/features.cc)
+- [Browser SSL configuration](https://github.com/chromium/chromium/blob/154.0.8037.49/chrome/browser/ssl/ssl_config_service_manager.cc)
+- [Advertisement and selection policy](https://github.com/chromium/chromium/blob/154.0.8037.49/net/ssl/ssl_config_service.cc)
+- [Root-store identifiers](https://github.com/chromium/chromium/blob/154.0.8037.49/net/data/ssl/chrome_root_store/root_store.textproto)

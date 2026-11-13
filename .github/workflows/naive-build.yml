@@ -7,6 +7,10 @@ on:
         description: 'Release tag'
         type: string
         required: false
+      validation_only:
+        description: 'Run Chromium upgrade regression tests without publishing'
+        type: boolean
+        default: false
   push:
     branches: [main, dev]
   pull_request:
@@ -17,7 +21,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  chromium-validation:
+    if: inputs.validation_only
+    permissions:
+      contents: read
+    uses: ./.github/workflows/chromium-154.yml
+
   linux:
+    if: ${{ !inputs.validation_only }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -125,9 +136,11 @@ jobs:
             lib_*_cgo.go
 
   darwin:
-    runs-on: macos-15
+    if: ${{ !inputs.validation_only }}
+    runs-on: macos-15-intel
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         include:
           - target: darwin/amd64
@@ -191,7 +204,7 @@ jobs:
           go run ./cmd/build-naive --target=${{ matrix.target }} package --local
           go run ./cmd/build-naive --target=${{ matrix.target }} package
       - name: Build and run test binary
-        if: matrix.target == 'darwin/arm64'
+        if: matrix.target == 'darwin/amd64'
         run: |
           CGO_ENABLED=1 go -C test test -c -o ../cronet.test .
           ./cronet.test -test.v -test.run=TestEngineVersion
@@ -205,6 +218,7 @@ jobs:
             lib_*_cgo.go
 
   windows:
+    if: ${{ !inputs.validation_only }}
     runs-on: windows-2022
     env:
       SCCACHE_ARM64_VERSION: 0.12.0
@@ -298,6 +312,7 @@ jobs:
             include_cgo.go
 
   android:
+    if: ${{ !inputs.validation_only }}
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -374,6 +389,7 @@ jobs:
             lib_*_cgo.go
 
   linux-musl:
+    if: ${{ !inputs.validation_only }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -425,6 +441,18 @@ jobs:
       - name: Build
         if: steps.build-cache.outputs.cache-hit != 'true'
         run: go run ./cmd/build-naive --target=linux/${{ matrix.arch }} --libc=musl build
+      - name: Save MIPS native build for runtime diagnosis
+        if: matrix.arch == 'mipsle' && steps.build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: naiveproxy/src/out
+          key: naive-build-${{ steps.naive.outputs.commit }}-${{ hashFiles('cmd/build-naive/cmd_build.go', 'cmd/build-naive/cmd.go') }}-linux-musl-${{ matrix.arch }}
+      - name: Save MIPS compiler cache
+        if: matrix.arch == 'mipsle' && steps.build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-linux-musl-${{ matrix.arch }}-${{ steps.chromium.outputs.version }}
       - name: Show ccache stats
         if: steps.build-cache.outputs.cache-hit != 'true'
         run: ccache -s
@@ -446,6 +474,7 @@ jobs:
           [[ "${{ matrix.arch }}" == "mipsle" ]] && GO_TEST_LDFLAGS=-ldflags=-w || true
           CGO_ENABLED=1 GOOS=linux GOARCH=${{ matrix.arch }} go -C test test -c $GO_TEST_LDFLAGS -tags with_musl -o ../cronet.test .
       - name: Run test binary
+        id: smoke
         run: |
           # Static binary - can run directly with QEMU binfmt or explicit QEMU for cross-arch
           case "${{ matrix.arch }}" in
@@ -458,6 +487,41 @@ jobs:
             riscv64) QEMU=(qemu-riscv64) ;;
           esac
           timeout 120 "${QEMU[@]}" ./cronet.test -test.v -test.run=TestEngineVersion -test.timeout=90s
+      - name: Check MIPS allocator override detection
+        if: matrix.arch == 'mipsle'
+        run: bash test/native/check_mips_musl.sh
+      - name: Diagnose MIPS runtime failure
+        if: failure() && matrix.arch == 'mipsle' && steps.smoke.outcome == 'failure'
+        run: |
+          sudo apt-get install -y --no-install-recommends gdb-multiarch
+          mkdir -p test-artifacts/mipsle-musl
+          ulimit -c 0
+          qemu-mipsel -g 12345 ./cronet.test -test.v -test.run=TestEngineVersion -test.timeout=90s >test-artifacts/mipsle-musl/qemu.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          timeout 120 gdb-multiarch -q -batch ./cronet.test \
+            -ex 'set pagination off' \
+            -ex 'set tcp auto-retry on' \
+            -ex 'set tcp connect-timeout 30' \
+            -ex 'target remote :12345' \
+            -ex 'handle SIGURG nostop noprint pass' \
+            -ex 'continue' \
+            -ex 'info threads' \
+            -ex 'thread apply all bt 30' \
+            -ex 'info registers' \
+            -ex 'x/24i $pc-32' >test-artifacts/mipsle-musl/gdb.log 2>&1 || true
+          cat test-artifacts/mipsle-musl/gdb.log
+      - name: Upload MIPS failure diagnostics
+        if: failure() && matrix.arch == 'mipsle' && steps.smoke.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-mipsle-musl
+          path: |
+            test-artifacts/mipsle-musl/
+            cronet.test
+            lib/linux_mipsle_musl/libcronet.a
+            naiveproxy/src/out/cronet-openwrt-mipsel/args.gn
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         with:
           name: cronet-linux-musl-${{ matrix.arch }}
@@ -468,7 +532,7 @@ jobs:
             lib_*_cgo.go
 
   integration-test:
-    if: github.event_name != 'workflow_dispatch'
+    if: github.event_name != 'workflow_dispatch' && !inputs.validation_only
     needs: [linux, darwin, windows]
     strategy:
       fail-fast: false
@@ -664,6 +728,7 @@ jobs:
 
   publish:
     if: |
+      !inputs.validation_only &&
       !cancelled() &&
       (github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'push' && !contains(github.event.head_commit.message, '[skip publish]'))) &&
@@ -717,7 +782,7 @@ jobs:
 
   release:
     needs: [linux, windows]
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && !inputs.validation_only
     runs-on: ubuntu-22.04
     permissions:
       actions: read

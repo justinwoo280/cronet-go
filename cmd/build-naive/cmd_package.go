@@ -143,14 +143,10 @@ func generateLocalCGOFiles(targets []Target) {
 
 		buildTag := getBuildTag(t)
 
-		var ldFlags []string
-
 		libraryPath := fmt.Sprintf("${SRCDIR}/lib/%s/libcronet.a", directoryName)
-		if t.GOOS == "darwin" || t.GOOS == "ios" {
-			ldFlags = append(ldFlags, libraryPath)
-		} else {
-			ldFlags = append(ldFlags, fmt.Sprintf("-L${SRCDIR}/lib/%s", directoryName), "-l:libcronet.a")
-		}
+		// Select the archive explicitly even when libcronet.so is alongside it.
+		// Go 1.26.11 no longer accepts the GNU -l:filename form in cgo directives.
+		ldFlags := []string{libraryPath}
 
 		ldFlags = append(ldFlags, linkFlags.LDFlags...)
 		ldFlags = append(ldFlags, linkFlags.Libs...)
@@ -358,13 +354,7 @@ go 1.20
 
 		buildTag := getBuildTag(t)
 
-		var ldFlags []string
-
-		if t.GOOS == "darwin" || t.GOOS == "ios" {
-			ldFlags = append(ldFlags, "${SRCDIR}/libcronet.a")
-		} else {
-			ldFlags = append(ldFlags, "-L${SRCDIR}", "-l:libcronet.a")
-		}
+		ldFlags := []string{"${SRCDIR}/libcronet.a"}
 
 		ldFlags = append(ldFlags, linkFlags.LDFlags...)
 		ldFlags = append(ldFlags, linkFlags.Libs...)
