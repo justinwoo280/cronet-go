@@ -6,6 +6,11 @@ It also downloads a pinned sing-box checkout and runs the actual REALITY/XHTTP
 and VLESS interoperability tests with CGO, PureGo, and Happy Eyeballs V3. To run
 only the downstream tests, use `bash test/native/check_sing_box.sh`.
 
+For a packaged MIPS/musl build, `bash test/native/check_mips_musl.sh` runs a
+cross-compiled fixture under QEMU. It checks libc++'s weak/strong function
+override detection and all four nothrow allocation forms, guarding against
+the MIPS GOT16 alias regression.
+
 Run from the cronet-go repository root after building the Linux static library.
 The commands use the packaged archive by default. For an unpackaged local rebuild,
 set `CRONET_TEST_STATIC_LIB` to

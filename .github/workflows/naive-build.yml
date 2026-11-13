@@ -487,6 +487,9 @@ jobs:
             riscv64) QEMU=(qemu-riscv64) ;;
           esac
           timeout 120 "${QEMU[@]}" ./cronet.test -test.v -test.run=TestEngineVersion -test.timeout=90s
+      - name: Check MIPS allocator override detection
+        if: matrix.arch == 'mipsle'
+        run: bash test/native/check_mips_musl.sh
       - name: Diagnose MIPS runtime failure
         if: failure() && matrix.arch == 'mipsle' && steps.smoke.outcome == 'failure'
         run: |
