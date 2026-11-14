@@ -11,6 +11,20 @@ cross-compiled fixture under QEMU. It checks libc++'s weak/strong function
 override detection and all four nothrow allocation forms, guarding against
 the MIPS GOT16 alias regression.
 
+For a packaged Android x86_64 archive, build the root Go test binary with
+`GOOS=android GOARCH=amd64 CGO_ENABLED=1 go test -c -tags with_cronet_test -o cronet-android.test .`
+using the Android NDK's API-23 compiler. On an attached emulator, run
+`bash test/native/check_android.sh`. The Android Browser runtime workflow runs
+this on API 29 and 35, covering lookup failure/recovery, actual ECH handshakes,
+authenticated retries, rejection and connection reuse. Publication requires
+these runtime tests in addition to compiling all Android ABIs.
+
+The workflow can reuse a prior native-build run via its `native_run` input.
+`expect_crash` is only for confirming the old Strict ECH/null-platform-factory
+regression: ordinary Browser and failed-lookup controls must pass before the
+successful-lookup request reproduces a native segmentation fault. Diagnostics
+include test output, logcat, tombstones and the unstripped Go test executable.
+
 Run from the cronet-go repository root after building the Linux static library.
 The commands use the packaged archive by default. For an unpackaged local rebuild,
 set `CRONET_TEST_STATIC_LIB` to

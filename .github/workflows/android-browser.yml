@@ -1,0 +1,141 @@
+name: Android Browser runtime
+
+on:
+  push:
+    branches: [android-ech-fix]
+  workflow_dispatch:
+    inputs:
+      native_run:
+        description: 'Use Android artifacts from this run instead of rebuilding'
+        type: string
+        default: ''
+      expect_crash:
+        description: 'Verify the unfixed ECH crash against an older archive'
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      native_run:
+        type: string
+        default: ''
+      expect_crash:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: android-browser-${{ github.ref }}-${{ inputs.native_run || 'build' }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: ${{ !inputs.native_run }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CCACHE_MAXSIZE: 2G
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build ccache gpgv python3-requests
+      - name: Cache Android toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            naiveproxy/src/third_party/llvm-build
+            naiveproxy/src/third_party/android_toolchain/ndk
+            naiveproxy/src/gn/out
+            naiveproxy/src/chrome/build/pgo_profiles
+            naiveproxy/src/out/sysroot-build
+          key: chromium-154-android-toolchain-${{ hashFiles('naiveproxy/src/get-clang.sh', 'naiveproxy/src/DEPS', 'naiveproxy/src/tools/clang/scripts/update.py') }}
+      - name: Cache native objects
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: android-browser-ccache-${{ github.sha }}
+          restore-keys: |
+            android-browser-ccache-
+            ccache-android-amd64-
+      - name: Build and package Android x86_64
+        run: |
+          go run ./cmd/build-naive --target=android/amd64 build --jobs=3
+          go run ./cmd/build-naive --target=android/amd64 package --local
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cronet-android-amd64
+          path: |
+            lib/
+            include/
+            lib_android_amd64_cgo.go
+
+  runtime:
+    needs: build
+    if: ${{ always() && !cancelled() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [29, 35]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Download native archive
+        uses: actions/download-artifact@v4
+        with:
+          name: cronet-android-amd64
+          run-id: ${{ inputs.native_run || github.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r28
+      - name: Build Android runtime tests
+        env:
+          CGO_ENABLED: '1'
+          GOOS: android
+          GOARCH: amd64
+          CC: ${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android23-clang
+        run: go test -c -tags with_cronet_test -o cronet-android.test .
+      - name: Enable emulator KVM access
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Run Browser and Strict ECH on Android
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          CRONET_ANDROID_EXPECT_CRASH: ${{ inputs.expect_crash && '1' || '0' }}
+          CRONET_ANDROID_ARTIFACT_DIR: test-artifacts/android-${{ matrix.api }}
+        with:
+          api-level: ${{ matrix.api }}
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot
+          script: bash test/native/check_android.sh
+      - name: Upload runtime diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-browser-${{ matrix.api }}
+          path: |
+            test-artifacts/
+            cronet-android.test
+          retention-days: 7
