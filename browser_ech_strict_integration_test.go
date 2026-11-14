@@ -14,6 +14,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log"
 	"math/big"
@@ -65,6 +66,69 @@ func strictECHCertificate(t *testing.T, names ...string) (tls.Certificate, strin
 		t.Fatal(err)
 	}
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+}
+
+// A failed external lookup must leave the engine usable. In particular, Android
+// must still use the in-process DNS bridge when a later lookup supplies ECH:
+// switching to the platform DNS backend here used to dereference a null factory.
+func TestBrowserECHLookupRecovery(t *testing.T) {
+	for _, mode := range []string{BrowserXHTTPModePacketUp, BrowserXHTTPModeStreamUp, BrowserXHTTPModeStreamOne} {
+		t.Run(mode, func(t *testing.T) {
+			key, config := strictECHKey(t)
+			certificate, roots := strictECHCertificate(t, "inner.test", "public.test")
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !r.TLS.ECHAccepted || r.TLS.ServerName != "inner.test" || r.ProtoMajor != 2 {
+					t.Errorf("unexpected request: ECH=%v SNI=%q protocol=%s", r.TLS.ECHAccepted, r.TLS.ServerName, r.Proto)
+				}
+				_, _ = io.WriteString(w, "ECH recovered")
+			}))
+			server.EnableHTTP2 = true
+			server.TLS = &tls.Config{Certificates: []tls.Certificate{certificate}, EncryptedClientHelloKeys: []tls.EncryptedClientHelloKey{key}}
+			server.StartTLS()
+			defer server.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			var ready atomic.Bool
+			var dials atomic.Int32
+			lookupError := errors.New("ECH lookup unavailable")
+			client, err := NewBrowserXHTTPClient(ctx, "https://inner.test", BrowserXHTTPOptions{
+				Mode: mode, TrustedRootCertificates: roots,
+				GetECHConfigList: func(context.Context) ([]byte, error) {
+					if !ready.Load() {
+						return nil, lookupError
+					}
+					return bytes.Clone(config), nil
+				},
+				DialContext: func(ctx context.Context) (net.Conn, error) {
+					dials.Add(1)
+					return (&net.Dialer{}).DialContext(ctx, "tcp", server.Listener.Addr().String())
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			if _, err := client.DialContext(ctx); !errors.Is(err, lookupError) {
+				t.Fatalf("first lookup: %v", err)
+			}
+			if dials.Load() != 0 {
+				t.Fatal("failed lookup opened a connection")
+			}
+			ready.Store(true)
+			conn, err := client.DialContext(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			data := make([]byte, len("ECH recovered"))
+			if _, err := io.ReadFull(conn, data); err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != "ECH recovered" {
+				t.Fatalf("response: %q", data)
+			}
+		})
+	}
 }
 
 // Observe bytes before the Go server decrypts ClientHelloInner. Recording the

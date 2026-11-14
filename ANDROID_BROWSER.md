@@ -1,5 +1,35 @@
 # Browser XHTTP in SekaiMod on Android
 
+## Android Strict ECH runtime verification, 2026-11-14
+
+The Chromium 154 standalone Android build had a resolver capability mismatch:
+Strict ECH forced platform DNS on API 29+, although this build does not install
+a `DnsPlatformAttemptFactory`. A successful ECH configuration lookup therefore
+reached a null virtual call inside `DnsTransactionImpl::MakeAttempt()`. Failed
+lookups returned before that path. In an Android VPN service, the native process
+death surfaced to the UI as `DeadObjectException`.
+
+The production arm64 tombstone was matched to its exact `libgojni.so` Build ID
+and to the corresponding archive's disassembly. The fix makes platform-DNS
+availability reflect the standalone build, retaining the existing built-in DNS
+and custom socket callbacks. Strict ECH and certificate verification stay enabled.
+
+- [Unfixed baseline 43547510523](https://github.com/justinwoo280/cronet-go/actions/runs/43547510523)
+  reproduced the same native null-pointer crash on Android 10/API 29 and
+  Android 15/API 35, after ordinary Browser and failed-lookup controls passed.
+- [Fixed validation 43547377827](https://github.com/justinwoo280/cronet-go/actions/runs/43547377827)
+  passed both emulator versions: failed-lookup recovery in all three XHTTP modes,
+  successful ECH, authenticated key retries, strict rejection and connection reuse.
+- These are x86_64 Android runtime tests using static CGO linkage. They supplement
+  all-ABI build/link checks; they do not constitute verification on every physical
+  device or of a complete VPN session. The main publication workflow now requires
+  the Android runtime suite to pass.
+
+## Historical integration and build notes
+
+The following records describe the earlier integration and its then-current
+build settings and verification scope.
+
 SekaiMod currently builds `libcore.aar` using `gomobile bind`. Use cronet-go's
 normal CGO bindings and statically link `libcronet.a` into the Go JNI library
 inside that AAR. Gradle already packages `app/libs/libcore.aar`; an additional

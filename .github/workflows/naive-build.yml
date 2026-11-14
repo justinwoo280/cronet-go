@@ -388,6 +388,15 @@ jobs:
             include_cgo.go
             lib_*_cgo.go
 
+  android-runtime:
+    needs: android
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/android-browser.yml
+    with:
+      native_run: ${{ github.run_id }}
+
   linux-musl:
     if: ${{ !inputs.validation_only }}
     runs-on: ubuntu-24.04
@@ -737,9 +746,10 @@ jobs:
       needs.darwin.result == 'success' &&
       needs.windows.result == 'success' &&
       needs.android.result == 'success' &&
+      needs['android-runtime'].result == 'success' &&
       (needs['integration-test'].result == 'success' ||
         (github.event_name == 'workflow_dispatch' && needs['integration-test'].result == 'skipped'))
-    needs: [linux, linux-musl, darwin, windows, android, integration-test]
+    needs: [linux, linux-musl, darwin, windows, android, android-runtime, integration-test]
     runs-on: ubuntu-22.04
     permissions:
       actions: read
