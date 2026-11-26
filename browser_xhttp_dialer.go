@@ -97,8 +97,8 @@ func (c *BrowserXHTTPClient) dialUDPSocket(_ string, _ uint16) (int, string, uin
 		defer cancel()
 		relayBrowserPackets(ctx, conn, pipe.(net.Conn))
 	}()
-	// The native socket close callback runs on Cronet's network thread. Only
-	// cancel here; the relay goroutine performs potentially blocking cleanup.
+	// Native close notifications can run on a Cronet network or dial worker
+	// thread. Only cancel here; the relay goroutine handles blocking cleanup.
 	return fd, localAddress, localPort, cancel
 }
 
