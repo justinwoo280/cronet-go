@@ -4,6 +4,17 @@ The maintained source is `justinwoo280/cronet-go` with its
 `naiveproxy-REALITY/naiveproxy` submodule, based on Chromium 154.0.8037.49.
 SagerNet/nekohasekai commits are reviewed as individual fixes for that fork.
 
+## Integration branches
+
+After validation, merge this wrapper into `justinwoo280/cronet-go:main` and
+the native changes into `naiveproxy-REALITY/naiveproxy:cronet-go-chromium-154`.
+The latter is the existing branch containing the previous wrapper's pinned
+native commit `ea9bfdf1a2971d8f1ccc98a3ebe96488af09645a`. The submodule branch
+metadata follows that maintained branch; builds remain pinned by the gitlink.
+Once the formal branches contain the validated commits and the gitlink matches,
+remove the temporary `integrate/selective-upstream-20261126` wrapper branch and
+`selective-upstream-20261126` native branch.
+
 ## Selected changes
 
 | Upstream wrapper commit | Integration |
