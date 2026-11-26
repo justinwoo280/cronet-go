@@ -511,35 +511,25 @@ func TestNaivePipeProxyMultipleConnections(t *testing.T) {
 
 // TestDNSTCFallbackToTCP verifies that when UDP DNS returns TC (Truncated),
 // Chromium falls back to TCP DNS and our TCP DNS interception works.
+// Proxy A/AAAA answers are synthesized before reaching DNSResolver, so use
+// HTTPS queries to exercise the resolver's actual packet/stream transport.
 func TestDNSTCFallbackToTCP(t *testing.T) {
 	env := setupTestEnv(t)
 	startEchoServer(t, 17007)
 
 	var dnsCallCount atomic.Int64
+	baseResolver := localhostDNSResolverWithHTTPSResponse(t, naiveServerPort, []string{"h2"})
 
 	// DNS resolver that returns a large response (> 512 bytes)
 	// This will trigger TC on UDP, forcing fallback to TCP
 	largeDNSResolver := func(ctx context.Context, request *mDNS.Msg) *mDNS.Msg {
+		response := baseResolver(ctx, request)
+		if len(request.Question) == 0 || request.Question[0].Qtype != mDNS.TypeHTTPS {
+			return response
+		}
 		dnsCallCount.Add(1)
 		count := dnsCallCount.Load()
 		t.Logf("DNS resolver called (call #%d): %v", count, request.Question)
-
-		response := new(mDNS.Msg)
-		response.SetReply(request)
-
-		for _, question := range request.Question {
-			if question.Qtype == mDNS.TypeA {
-				response.Answer = append(response.Answer, &mDNS.A{
-					Hdr: mDNS.RR_Header{
-						Name:   question.Name,
-						Rrtype: mDNS.TypeA,
-						Class:  mDNS.ClassINET,
-						Ttl:    300,
-					},
-					A: net.ParseIP("127.0.0.1"),
-				})
-			}
-		}
 
 		// Add many TXT records to exceed 512 bytes
 		for i := 0; i < 20; i++ {
@@ -556,11 +546,11 @@ func TestDNSTCFallbackToTCP(t *testing.T) {
 		return response
 	}
 
-	serverAddress := M.ParseSocksaddrHostPort("proxy.invalid", naiveServerPort)
 	client := env.newNaiveClient(t, cronet.NaiveClientOptions{
-		ServerAddress: serverAddress,
-		DNSResolver:   largeDNSResolver,
+		DNSResolver: largeDNSResolver,
+		ECHEnabled:  true,
 	})
+	netLogPath := startNetLogForTest(t, client, "dns_tcp_fallback_netlog.json", true)
 
 	// Make a connection - this will trigger DNS resolution
 	conn, err := client.DialEarly(context.Background(), M.ParseSocksaddrHostPort("127.0.0.1", 17007))
@@ -581,6 +571,24 @@ func TestDNSTCFallbackToTCP(t *testing.T) {
 	require.GreaterOrEqual(t, dnsCallCount.Load(), int64(2),
 		"DNS resolver should be called at least twice (UDP TC + TCP fallback)")
 	t.Logf("DNS resolver was called %d times", dnsCallCount.Load())
+
+	// Repeated resolver calls alone could be UDP retries. Require Chromium to
+	// have actually opened a TCP DNS transaction through the custom dialer.
+	client.Engine().StopNetLog()
+	logContent, err := os.ReadFile(netLogPath)
+	require.NoError(t, err)
+	var netLog netLogData
+	require.NoError(t, json.Unmarshal(logContent, &netLog))
+	tcpAttemptType, ok := netLog.Constants.LogEventTypes["DNS_TRANSACTION_TCP_ATTEMPT"]
+	require.True(t, ok, "DNS_TRANSACTION_TCP_ATTEMPT not in NetLog constants")
+	var tcpAttemptFound bool
+	for _, event := range netLog.Events {
+		if event.Type == tcpAttemptType {
+			tcpAttemptFound = true
+			break
+		}
+	}
+	require.True(t, tcpAttemptFound, "Chromium must retry the truncated DNS response over TCP")
 }
 
 // TestDNSInterceptionUDPLoopbackFallback verifies that DNS interception works
@@ -591,34 +599,22 @@ func TestDNSInterceptionUDPLoopbackFallback(t *testing.T) {
 	startEchoServer(t, 17008)
 
 	var dnsCallCount atomic.Int64
+	baseResolver := localhostDNSResolverWithHTTPSResponse(t, naiveServerPort, []string{"h2"})
 
 	countingResolver := func(ctx context.Context, request *mDNS.Msg) *mDNS.Msg {
-		dnsCallCount.Add(1)
-		t.Logf("UDP loopback DNS resolver called: %v", request.Question)
-		response := new(mDNS.Msg)
-		response.SetReply(request)
-		for _, question := range request.Question {
-			if question.Qtype == mDNS.TypeA {
-				response.Answer = append(response.Answer, &mDNS.A{
-					Hdr: mDNS.RR_Header{
-						Name:   question.Name,
-						Rrtype: mDNS.TypeA,
-						Class:  mDNS.ClassINET,
-						Ttl:    300,
-					},
-					A: net.ParseIP("127.0.0.1"),
-				})
-			}
+		if len(request.Question) > 0 && request.Question[0].Qtype == mDNS.TypeHTTPS {
+			dnsCallCount.Add(1)
+			t.Logf("UDP loopback DNS resolver called: %v", request.Question)
 		}
-		return response
+		return baseResolver(ctx, request)
 	}
 
-	serverAddress := M.ParseSocksaddrHostPort("proxy.invalid", naiveServerPort)
 	client := env.newNaiveClient(t, cronet.NaiveClientOptions{
-		ServerAddress:        serverAddress,
 		DNSResolver:          countingResolver,
+		ECHEnabled:           true,
 		TestForceUDPLoopback: true, // Force UDP loopback path
 	})
+	_ = startNetLogForTest(t, client, "dns_udp_loopback_netlog.json", false)
 
 	// Make a connection - this will trigger DNS resolution through UDP loopback
 	conn, err := client.DialEarly(context.Background(), M.ParseSocksaddrHostPort("127.0.0.1", 17008))
@@ -650,34 +646,22 @@ func TestDNSInterceptionDefaultPath(t *testing.T) {
 	startEchoServer(t, 17009)
 
 	var dnsCallCount atomic.Int64
+	baseResolver := localhostDNSResolverWithHTTPSResponse(t, naiveServerPort, []string{"h2"})
 
 	countingResolver := func(ctx context.Context, request *mDNS.Msg) *mDNS.Msg {
-		dnsCallCount.Add(1)
-		t.Logf("Default path DNS resolver called: %v", request.Question)
-		response := new(mDNS.Msg)
-		response.SetReply(request)
-		for _, question := range request.Question {
-			if question.Qtype == mDNS.TypeA {
-				response.Answer = append(response.Answer, &mDNS.A{
-					Hdr: mDNS.RR_Header{
-						Name:   question.Name,
-						Rrtype: mDNS.TypeA,
-						Class:  mDNS.ClassINET,
-						Ttl:    300,
-					},
-					A: net.ParseIP("127.0.0.1"),
-				})
-			}
+		if len(request.Question) > 0 && request.Question[0].Qtype == mDNS.TypeHTTPS {
+			dnsCallCount.Add(1)
+			t.Logf("Default path DNS resolver called: %v", request.Question)
 		}
-		return response
+		return baseResolver(ctx, request)
 	}
 
-	serverAddress := M.ParseSocksaddrHostPort("proxy.invalid", naiveServerPort)
 	client := env.newNaiveClient(t, cronet.NaiveClientOptions{
-		ServerAddress:        serverAddress,
 		DNSResolver:          countingResolver,
+		ECHEnabled:           true,
 		TestForceUDPLoopback: false, // Use default path (Unix SOCK_DGRAM or Windows UDP loopback)
 	})
+	_ = startNetLogForTest(t, client, "dns_default_path_netlog.json", false)
 
 	// Make a connection - this will trigger DNS resolution through default path
 	conn, err := client.DialEarly(context.Background(), M.ParseSocksaddrHostPort("127.0.0.1", 17009))
