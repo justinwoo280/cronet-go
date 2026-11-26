@@ -24,13 +24,19 @@ func TestNativeCustomDialDoesNotBlockNetworkThread(t *testing.T) {
 		_, _ = io.WriteString(w, "unrelated connection completed")
 	}))
 	defer server.Close()
+	blockedListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blockedListener.Close()
+	blockedAddress := M.SocksaddrFromNet(blockedListener.Addr())
 	started, release := make(chan struct{}, 1), make(chan struct{})
 	var releaseOnce sync.Once
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	engine := NewEngine()
 	engine.SetDialer(func(address string, port uint16) int {
-		if port == 1 {
+		if port == blockedAddress.Port {
 			select {
 			case started <- struct{}{}:
 			default:
@@ -71,7 +77,7 @@ func TestNativeCustomDialDoesNotBlockNetworkThread(t *testing.T) {
 	requests.Add(1)
 	go func() {
 		defer requests.Done()
-		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1:1/blocked", nil)
+		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+blockedAddress.String()+"/blocked", nil)
 		response, _ := transport.RoundTrip(request)
 		if response != nil {
 			response.Body.Close()
@@ -128,7 +134,7 @@ func TestNaiveResetCancelsPendingDial(t *testing.T) {
 	defer cancel()
 	dialer := pendingNaiveDialer{entered: make(chan context.Context, 32)}
 	client, err := NewNaiveClient(NaiveClientOptions{
-		Context: ctx, ServerAddress: M.ParseSocksaddr("127.0.0.1:1"), Dialer: dialer,
+		Context: ctx, ServerAddress: M.ParseSocksaddr("127.0.0.1:443"), Dialer: dialer,
 		DNSResolver: func(_ context.Context, request *mDNS.Msg) *mDNS.Msg { return new(mDNS.Msg).SetReply(request) },
 	})
 	if err != nil {
