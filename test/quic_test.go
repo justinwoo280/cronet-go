@@ -197,6 +197,7 @@ func TestNaiveQUICDomainNon443DoesNotIssueHTTPSDNSQueryByDefault(t *testing.T) {
 
 	client, err := cronet.NewNaiveClient(cronet.NaiveClientOptions{
 		ServerAddress:           M.ParseSocksaddrHostPort("example.org", naiveQUICServerPort),
+		Dialer:                  fixtureResolverDialer{resolver: dnsResolver},
 		ServerName:              "example.org",
 		Username:                "test",
 		Password:                "test",
@@ -249,6 +250,7 @@ func TestNaiveQUICDomainNon443ECHHTTPSDNSDelayAffectsHandshake(t *testing.T) {
 
 	client, err := cronet.NewNaiveClient(cronet.NaiveClientOptions{
 		ServerAddress:           M.ParseSocksaddrHostPort("example.org", naiveQUICServerPort),
+		Dialer:                  fixtureResolverDialer{resolver: dnsResolver},
 		ServerName:              "example.org",
 		Username:                "test",
 		Password:                "test",
@@ -310,6 +312,7 @@ func TestNaiveQUICDomainNon443ECHFixedConfigDisablesHTTPSLookup(t *testing.T) {
 
 	client, err := cronet.NewNaiveClient(cronet.NaiveClientOptions{
 		ServerAddress:           M.ParseSocksaddrHostPort("example.org", naiveQUICServerPort),
+		Dialer:                  fixtureResolverDialer{resolver: dnsResolver},
 		ServerName:              "example.org",
 		Username:                "test",
 		Password:                "test",

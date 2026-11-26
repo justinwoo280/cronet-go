@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -77,7 +78,12 @@ type NaiveClient struct {
 	streamEngines            []StreamEngine
 	activeConnections        sync.WaitGroup
 	proxyWaitGroup           sync.WaitGroup
+	proxyContext             context.Context
 	proxyCancel              context.CancelFunc
+	dialAccess               sync.Mutex
+	dialWaitGroup            sync.WaitGroup
+	dialContext              context.Context
+	dialCancel               context.CancelFunc
 }
 
 type NaiveClientOptions struct {
@@ -195,9 +201,7 @@ func (c *NaiveClient) Start() error {
 
 	defer func() {
 		if startError != nil {
-			if c.proxyCancel != nil {
-				c.proxyCancel()
-			}
+			c.stopDialers()
 			for _, engine := range engines {
 				engine.Shutdown()
 				engine.Destroy()
@@ -210,14 +214,13 @@ func (c *NaiveClient) Start() error {
 	}()
 
 	proxyContext, proxyCancel := context.WithCancel(c.ctx)
+	c.proxyContext = proxyContext
 	c.proxyCancel = proxyCancel
+	c.dialContext, c.dialCancel = context.WithCancel(proxyContext)
 
 	dnsServerAddress := M.ParseSocksaddrHostPort("127.0.0.1", 53)
-	dnsResolver := c.dnsResolver
-
-	if c.serverName != c.serverAddress.AddrString() {
-		dnsResolver = wrapDNSResolverForServerRedirect(dnsResolver, c.serverName, c.serverAddress)
-	}
+	serverNameAddress := M.ParseAddr(c.serverName)
+	dnsResolver := wrapDNSResolverWithFakeServerAddress(c.dnsResolver, c.serverName)
 
 	if c.echEnabled {
 		echQueryServerName := c.echQueryServerName
@@ -228,6 +231,11 @@ func (c *NaiveClient) Start() error {
 	}
 
 	tcpDialer := Dialer(func(address string, port uint16) int {
+		dialContext, loaded := c.beginDial()
+		if !loaded {
+			return NetErrorAborted.Code()
+		}
+		defer c.dialWaitGroup.Done()
 		if address == dnsServerAddress.AddrString() && port == dnsServerAddress.Port {
 			fd, conn, err := createSocketPair()
 			if err != nil {
@@ -245,8 +253,12 @@ func (c *NaiveClient) Start() error {
 		}
 
 		destination := M.ParseSocksaddrHostPort(address, port)
+		if slices.Contains(fakeServerAddresses, destination.Addr) {
+			destination = c.serverAddress
+			destination.Port = port
+		}
 		c.logger.DebugContext(c.ctx, "open TCP connection to ", destination)
-		conn, err := c.dialer.DialContext(proxyContext, N.NetworkTCP, destination)
+		conn, err := c.dialer.DialContext(dialContext, N.NetworkTCP, destination)
 		if err != nil {
 			c.logger.ErrorContext(c.ctx, "open TCP connection to ", destination, ": ", err)
 			return toNetError(err).Code()
@@ -280,6 +292,11 @@ func (c *NaiveClient) Start() error {
 	})
 
 	udpDialer := UDPDialer(func(address string, port uint16) (fd int, localAddress string, localPort uint16, onClose func()) {
+		dialContext, loaded := c.beginDial()
+		if !loaded {
+			return NetErrorAborted.Code(), "", 0, nil
+		}
+		defer c.dialWaitGroup.Done()
 		if address == dnsServerAddress.AddrString() && port == dnsServerAddress.Port {
 			fd, conn, err := createPacketSocketPair(c.testForceUDPLoopback)
 			if err != nil {
@@ -304,8 +321,24 @@ func (c *NaiveClient) Start() error {
 		}
 
 		destination := M.ParseSocksaddrHostPort(address, port)
+		isFakeServerAddress := slices.Contains(fakeServerAddresses, destination.Addr)
+		// Chromium probes IPv6 reachability through the UDP dialer before
+		// querying AAAA. Keep that probe local; only proxy QUIC goes upstream.
+		if !c.quicEnabled || !isFakeServerAddress && destination.Addr != serverNameAddress {
+			fd, conn, err := createPacketSocketPair(c.testForceUDPLoopback)
+			if err != nil {
+				c.logger.ErrorContext(c.ctx, "socket pair failed: ", err)
+				return NetErrorConnectionFailed.Code(), "", 0, nil
+			}
+			conn.Close()
+			return fd, "", 0, nil
+		}
+		if isFakeServerAddress {
+			destination = c.serverAddress
+			destination.Port = port
+		}
 		c.logger.DebugContext(c.ctx, "open UDP connection to ", destination)
-		conn, err := c.dialer.DialContext(proxyContext, N.NetworkUDP, destination)
+		conn, err := c.dialer.DialContext(dialContext, N.NetworkUDP, destination)
 		if err != nil {
 			c.logger.ErrorContext(c.ctx, "open UDP connection to ", destination, ": ", err)
 			return toNetError(err).Code(), "", 0, nil
@@ -458,6 +491,10 @@ func (c *NaiveClient) CloseAllConnections() {
 	c.activeOperations.Add(1)
 	c.lifecycleMu.Unlock()
 	defer c.activeOperations.Done()
+	c.dialAccess.Lock()
+	c.dialCancel()
+	c.dialContext, c.dialCancel = context.WithCancel(c.proxyContext)
+	c.dialAccess.Unlock()
 	for _, engine := range c.engines {
 		engine.CloseAllConnections()
 	}
@@ -521,6 +558,7 @@ func (c *NaiveClient) DialEarly(ctx context.Context, destination M.Socksaddr) (N
 		}
 	}
 	conn := streamEngine.CreateConn(ctx, c.logger, true, false)
+	conn.abortContext = c.loadDialContext()
 	trackedConn := &trackedNaiveConn{
 		NaiveConn: NewNaiveConn(ctx, conn, c.logger),
 		client:    c,
@@ -586,9 +624,7 @@ func (c *NaiveClient) Close() error {
 }
 
 func (c *NaiveClient) doClose() error {
-	if c.proxyCancel != nil {
-		c.proxyCancel()
-	}
+	c.stopDialers()
 
 	c.activeOperations.Wait()
 	for _, engine := range c.engines {
@@ -599,13 +635,38 @@ func (c *NaiveClient) doClose() error {
 		engine.Shutdown()
 		engine.Destroy()
 	}
-	// Only joining the engines guarantees that socket callbacks can no longer
-	// add relays or DNS workers to this wait group.
+	// Worker admissions have stopped and engine destruction has joined native
+	// dial tasks, so no callback can add another relay or DNS worker.
 	c.proxyWaitGroup.Wait()
 
 	c.state.Store(uint32(clientStateClosed))
 	close(c.closed)
 	return nil
+}
+
+func (c *NaiveClient) loadDialContext() context.Context {
+	c.dialAccess.Lock()
+	defer c.dialAccess.Unlock()
+	return c.dialContext
+}
+
+func (c *NaiveClient) beginDial() (context.Context, bool) {
+	c.dialAccess.Lock()
+	defer c.dialAccess.Unlock()
+	if c.proxyContext == nil || c.proxyContext.Err() != nil {
+		return nil, false
+	}
+	c.dialWaitGroup.Add(1)
+	return c.dialContext, true
+}
+
+func (c *NaiveClient) stopDialers() {
+	c.dialAccess.Lock()
+	if c.proxyCancel != nil {
+		c.proxyCancel()
+	}
+	c.dialAccess.Unlock()
+	c.dialWaitGroup.Wait()
 }
 
 func (c *NaiveClient) getECHConfigList() []byte {

@@ -4,9 +4,9 @@ package cronet
 //
 // Priority: serverName (SNI) = ServerName config > ServerAddress
 //
-// A/AAAA queries for serverName:
-//   - If ServerAddress is a domain (different from serverName): redirect query to ServerAddress
-//   - If ServerAddress is an IP: return synthetic response (mismatched type returns empty SUCCESS)
+// A/AAAA queries for serverName use a locally routable placeholder. The custom
+// dialer receives ServerAddress and owns its resolution, keeping detour/DNS
+// policy intact even when the TLS ServerName has no public address records.
 //
 // HTTPS queries for serverName (ECH):
 //   - If fixed ECHConfigList exists: return synthetic response immediately
@@ -25,7 +25,6 @@ import (
 
 	"github.com/sagernet/sing/common/bufio"
 	"github.com/sagernet/sing/common/logger"
-	M "github.com/sagernet/sing/common/metadata"
 
 	mDNS "github.com/miekg/dns"
 )
@@ -38,6 +37,27 @@ import (
 type DNSResolverFunc func(ctx context.Context, request *mDNS.Msg) (response *mDNS.Msg)
 
 const chromiumDNSUDPMaxSize = 512
+
+var (
+	fakeServerAddress4        = netip.AddrFrom4([4]byte{192, 0, 2, 1})
+	fakeServerAddress6        = netip.AddrFrom16([16]byte{0x20, 0x01, 0x0d, 0xb8, 15: 1})
+	fakeServerAddressLoopback = netip.AddrFrom4([4]byte{127, 0, 0, 1})
+	fakeServerAddresses       = []netip.Addr{fakeServerAddress4, fakeServerAddress6, fakeServerAddressLoopback}
+)
+
+// Chromium's address sorter probes resolved addresses through kernel UDP
+// sockets, outside the custom dialer. Select a placeholder that this host can
+// route so IPv6-only or loopback-only hosts do not discard the proxy address.
+func selectFakeServerAddress() netip.Addr {
+	for _, address := range []netip.Addr{fakeServerAddress4, fakeServerAddress6} {
+		conn, err := net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(netip.AddrPortFrom(address, 443)))
+		if err == nil {
+			conn.Close()
+			return address
+		}
+	}
+	return fakeServerAddressLoopback
+}
 
 func serveDNSPacketConn(ctx context.Context, conn net.PacketConn, resolver DNSResolverFunc) error {
 	defer conn.Close()
@@ -401,86 +421,28 @@ func filterIPHintsFromSVCB(svcb *mDNS.SVCB) {
 	svcb.Value = filtered
 }
 
-func wrapDNSResolverForServerRedirect(
-	resolver DNSResolverFunc,
-	serverName string,
-	serverAddress M.Socksaddr,
-) DNSResolverFunc {
+func wrapDNSResolverWithFakeServerAddress(resolver DNSResolverFunc, serverName string) DNSResolverFunc {
+	serverFQDN := mDNS.Fqdn(serverName)
 	return func(ctx context.Context, request *mDNS.Msg) *mDNS.Msg {
 		if len(request.Question) == 0 {
 			return resolver(ctx, request)
 		}
-
 		question := request.Question[0]
-		if question.Qtype != mDNS.TypeA && question.Qtype != mDNS.TypeAAAA {
+		if question.Qtype != mDNS.TypeA && question.Qtype != mDNS.TypeAAAA || !strings.EqualFold(question.Name, serverFQDN) {
 			return resolver(ctx, request)
 		}
-
-		queryName := strings.TrimSuffix(question.Name, ".")
-		if !strings.EqualFold(queryName, serverName) {
-			return resolver(ctx, request)
+		response := new(mDNS.Msg)
+		response.SetReply(request)
+		fakeAddress := selectFakeServerAddress()
+		header := mDNS.RR_Header{
+			Name: question.Name, Rrtype: question.Qtype, Class: mDNS.ClassINET, Ttl: 300,
 		}
-
-		if serverAddress.IsIP() {
-			return synthesizeAddressResponse(request, serverAddress.Addr)
-		}
-
-		redirectedRequest := request.Copy()
-		redirectedRequest.Question[0].Name = mDNS.Fqdn(serverAddress.AddrString())
-
-		response := resolver(ctx, redirectedRequest)
-		if response != nil {
-			response = response.Copy()
-			response.Question = request.Question
-			rewriteAddressAnswerNames(response, serverAddress.AddrString(), serverName)
+		switch {
+		case question.Qtype == mDNS.TypeA && fakeAddress.Is4():
+			response.Answer = append(response.Answer, &mDNS.A{Hdr: header, A: fakeAddress.AsSlice()})
+		case question.Qtype == mDNS.TypeAAAA && fakeAddress.Is6():
+			response.Answer = append(response.Answer, &mDNS.AAAA{Hdr: header, AAAA: fakeAddress.AsSlice()})
 		}
 		return response
 	}
-}
-
-func rewriteAddressAnswerNames(response *mDNS.Msg, fromDomain, toDomain string) {
-	fromDomain = strings.TrimSuffix(fromDomain, ".")
-	toDomain = strings.TrimSuffix(toDomain, ".")
-	toFQDN := toDomain + "."
-
-	for _, rr := range response.Answer {
-		hdrName := strings.TrimSuffix(rr.Header().Name, ".")
-		if strings.EqualFold(hdrName, fromDomain) {
-			rr.Header().Name = toFQDN
-		}
-	}
-}
-
-func synthesizeAddressResponse(request *mDNS.Msg, address netip.Addr) *mDNS.Msg {
-	response := new(mDNS.Msg)
-	response.SetReply(request)
-
-	if len(request.Question) == 0 {
-		return response
-	}
-
-	question := request.Question[0]
-	if question.Qtype == mDNS.TypeA && address.Is4() {
-		response.Answer = append(response.Answer, &mDNS.A{
-			Hdr: mDNS.RR_Header{
-				Name:   question.Name,
-				Rrtype: mDNS.TypeA,
-				Class:  mDNS.ClassINET,
-				Ttl:    300,
-			},
-			A: address.AsSlice(),
-		})
-	} else if question.Qtype == mDNS.TypeAAAA && address.Is6() {
-		response.Answer = append(response.Answer, &mDNS.AAAA{
-			Hdr: mDNS.RR_Header{
-				Name:   question.Name,
-				Rrtype: mDNS.TypeAAAA,
-				Class:  mDNS.ClassINET,
-				Ttl:    300,
-			},
-			AAAA: address.AsSlice(),
-		})
-	}
-
-	return response
 }

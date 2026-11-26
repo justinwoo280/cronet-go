@@ -149,6 +149,34 @@ type errorDialer struct {
 	err error
 }
 
+// Naive passes ServerAddress to its configured dialer. Resolve fixture domains
+// here, using the same controlled records as the HTTPS/ECH resolver, so these
+// tests cannot accidentally contact public DNS or the TLS camouflage hostname.
+type fixtureResolverDialer struct{ resolver cronet.DNSResolverFunc }
+
+func (d fixtureResolverDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	if destination.IsDomain() {
+		response := d.resolver(ctx, new(mDNS.Msg).SetQuestion(mDNS.Fqdn(destination.Fqdn), mDNS.TypeA))
+		if response == nil || response.Rcode != mDNS.RcodeSuccess {
+			return nil, fmt.Errorf("fixture could not resolve %s", destination.Fqdn)
+		}
+		for _, record := range response.Answer {
+			if address, ok := record.(*mDNS.A); ok {
+				destination = M.ParseSocksaddrHostPort(address.A.String(), destination.Port)
+				break
+			}
+		}
+		if destination.IsDomain() {
+			return nil, fmt.Errorf("fixture returned no address for %s", destination.Fqdn)
+		}
+	}
+	return N.SystemDialer.DialContext(ctx, network, destination)
+}
+
+func (d fixtureResolverDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+	return N.SystemDialer.ListenPacket(ctx, destination)
+}
+
 func (d *errorDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	return nil, d.err
 }
@@ -735,7 +763,7 @@ func TestNaiveInsecureConcurrencySessionCount(t *testing.T) {
 // is a domain and ServerName is a different domain, the connection uses ServerAddress's
 // resolved IP, not ServerName's IP.
 //
-// This tests the DNS redirect logic in wrapDNSResolverForServerRedirect.
+// This tests delegation to the configured dialer rather than resolution of SNI.
 func TestServerAddressDomainWithDifferentServerName(t *testing.T) {
 	env := setupTestEnv(t)
 	startEchoServer(t, 18100)
@@ -792,6 +820,7 @@ func TestServerAddressDomainWithDifferentServerName(t *testing.T) {
 	// ServerAddress = proxy.example.com (the actual server to connect to)
 	config := cronet.NaiveClientOptions{
 		ServerAddress:           M.ParseSocksaddrHostPort("proxy.example.com", naiveServerPort),
+		Dialer:                  fixtureResolverDialer{resolver: dnsResolver},
 		ServerName:              "example.org",
 		Username:                "test",
 		Password:                "test",
@@ -880,6 +909,7 @@ func TestServerAddressDomainWithNXDomainServerName(t *testing.T) {
 	// Configure with ServerAddress as domain, ServerName returns NXDOMAIN
 	config := cronet.NaiveClientOptions{
 		ServerAddress:           M.ParseSocksaddrHostPort("proxy.example.com", naiveServerPort),
+		Dialer:                  fixtureResolverDialer{resolver: dnsResolver},
 		ServerName:              "example.org",
 		Username:                "test",
 		Password:                "test",
